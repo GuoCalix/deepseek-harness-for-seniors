@@ -1,14 +1,21 @@
 {
   "name": "ai-for-the-old",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
+  "main": "electron/main.mjs",
   "description": "A local-first DeepSeek task workspace for older adults.",
+  "author": "GuoCalix",
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:web": "vite --host 127.0.0.1",
     "dev:api": "node app/server/index.mjs",
     "build": "vite build",
+    "desktop:build": "npm run build",
+    "desktop:dir": "npm run desktop:build && electron-builder --dir",
+    "desktop:mac": "npm run desktop:build && electron-builder --mac dmg",
+    "desktop:win": "npm run desktop:build && electron-builder --win nsis",
+    "desktop": "npm run desktop:build && electron-builder",
     "preview": "vite preview --host 127.0.0.1",
     "test": "vitest run",
     "check": "tsc --noEmit",
@@ -22,11 +29,43 @@
     "react-dom": "latest",
     "vite": "latest"
   },
+  "build": {
+    "appId": "com.guocalix.aifortheold",
+    "productName": "AI for the old",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "app/server/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true
+    }
+  },
   "devDependencies": {
     "@types/node": "latest",
     "@types/qrcode": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
+    "electron": "^44.4.3",
+    "electron-builder": "^26.15.3",
     "jsdom": "latest",
     "typescript": "latest",
     "vitest": "latest"

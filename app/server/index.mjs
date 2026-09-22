@@ -5,11 +5,12 @@ import os from 'node:os'
 import crypto from 'node:crypto'
 
 const port = Number(process.env.AI_OLD_API_PORT ?? 4179)
-const dataDir = path.join(process.cwd(), 'app', 'data')
+const dataDir = process.env.AI_OLD_DATA_DIR ?? path.join(process.cwd(), 'app', 'data')
 const tasksFile = path.join(dataDir, 'tasks.json')
 const desktop = path.join(os.homedir(), 'Desktop')
-const workspaceRoot = path.join(desktop, 'AI for the old')
+const workspaceRoot = process.env.AI_OLD_WORKSPACE_ROOT ?? path.join(desktop, 'AI for the old')
 const allowedTools = ['list_files', 'read_metadata', 'read_text', 'copy_files', 'create_directory', 'write_text', 'convert_document', 'create_spreadsheet', 'open_result']
+const allowMockModel = process.env.AI_OLD_ALLOW_MOCK === 'true' || process.env.NODE_ENV === 'test'
 
 const now = () => new Date().toISOString()
 const id = (prefix) => `${prefix}_${crypto.randomUUID().slice(0, 8)}`
@@ -45,18 +46,18 @@ async function createWorkspace(title) {
 
 function event(type, label, extra = {}) { return { id: id('evt'), type, label, occurredAt: now(), ...extra } }
 
-async function createTask(prompt) {
+async function createTask(prompt, candidateOptions = []) {
   const createdAt = now()
   const title = titleFor(prompt)
   return {
     id: id('task'), title, prompt, status: 'CLARIFYING', stage: 'clarifying', createdAt, updatedAt: createdAt,
     workspacePath: null, turns: [{ id: id('turn'), role: 'user', content: prompt, createdAt }],
-    events: [event('task.created', '已记录你的需求')], artifacts: [], feedback: [],
+    events: [event('task.created', '已记录你的需求')], artifacts: [], feedback: [], candidateOptions,
     accessScope: null, version: 1, foundFiles: 0, completedSteps: 0, totalSteps: 5, elapsedSeconds: 0,
   }
 }
 
-function candidates(prompt) {
+function fallbackCandidates(prompt) {
   const text = prompt.toLowerCase()
   if (text.includes('照片') || text.includes('图片')) return [
     { id: 'photos-by-date', title: '按日期整理照片', description: '从常用文件夹找出照片，按拍摄年份和月份放进新文件夹。', needs: '桌面、下载、微信文件中的图片' },
@@ -73,6 +74,103 @@ function candidates(prompt) {
     { id: 'document', title: '生成一份新材料', description: '读取必要的参考内容，生成一份可以继续编辑的材料。', needs: '你允许访问的参考文件' },
     { id: 'inventory', title: '先做一份文件清单', description: '不改动原文件，列出可能相关的文件和所在位置。', needs: '文件名、日期和大小' },
   ]
+}
+
+function modelJson(content) {
+  const cleaned = String(content ?? '').trim().replace(/^```(?:json)?\s*/iu, '').replace(/\s*```$/u, '')
+  try { return JSON.parse(cleaned) }
+  catch { throw new Error('DeepSeek 返回的 JSON 无法解析') }
+}
+
+function requireString(value, label) {
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`DeepSeek 返回缺少 ${label}`)
+  return value.trim()
+}
+
+function validateCandidates(value) {
+  if (!value || !Array.isArray(value.candidates) || value.candidates.length < 1 || value.candidates.length > 3) throw new Error('DeepSeek 必须返回 1 到 3 个候选意图')
+  return value.candidates.map((item, index) => ({
+    id: slug(requireString(item.title, `候选 ${index + 1} 标题`)),
+    title: requireString(item.title, `候选 ${index + 1} 标题`),
+    description: requireString(item.description, `候选 ${index + 1} 描述`),
+    needs: requireString(item.needs, `候选 ${index + 1} 文件范围`),
+  }))
+}
+
+function validatePlan(value) {
+  const action = value?.next_action
+  if (action !== 'ready_to_run' && action !== 'ask_question') throw new Error('DeepSeek 返回了未知的澄清动作')
+  const plan = {
+    nextAction: action,
+    question: typeof value.question === 'string' ? value.question.trim() : '',
+    target: requireString(value.target, '任务目标'),
+    output: requireString(value.output, '预计产物'),
+    network: requireString(value.network, '联网说明'),
+    summary: requireString(value.summary, '确认摘要'),
+  }
+  if (action === 'ask_question' && !plan.question) throw new Error('需要继续澄清时必须返回问题')
+  return plan
+}
+
+function validateResult(value) {
+  if (!value || typeof value !== 'object') throw new Error('DeepSeek 结果不是对象')
+  const summary = requireString(value.summary, '结果摘要')
+  const suggestions = Array.isArray(value.suggestions) ? value.suggestions.map(item => requireString(item, '建议')).slice(0, 5) : []
+  const feedbackOptions = Array.isArray(value.feedback_options) ? value.feedback_options.map(item => requireString(item, '反馈选项')).slice(0, 7) : []
+  if (feedbackOptions.length < 2) throw new Error('DeepSeek 至少需要返回两个反馈选项')
+  return { summary, suggestions, feedbackOptions, markdown: typeof value.markdown === 'string' && value.markdown.trim() ? value.markdown.trim() : summary }
+}
+
+async function generateCandidates(prompt, locale = 'zh') {
+  const fallback = fallbackCandidates(prompt)
+  const raw = await callDeepSeek([
+    { role: 'system', content: `你是面向中老年用户的任务澄清助手。根据用户的一句话，提出最多三个互不重复、容易理解的候选意图。只返回 JSON，不要解释，不要输出命令。每个候选必须有 title、description、needs 字段。title 和 description 使用 ${locale === 'en' ? 'English' : '简体中文'}。` },
+    { role: 'user', content: JSON.stringify({ prompt, output_schema: { candidates: [{ title: 'string', description: 'string', needs: 'string' }] } }) },
+  ])
+  if (raw === null) {
+    if (allowMockModel) return fallback
+    throw new Error('未配置 DEEPSEEK_API_KEY，无法生成实时候选意图')
+  }
+  return validateCandidates(modelJson(raw))
+}
+
+async function generatePlan(task, content, locale = 'zh') {
+  const fallback = { nextAction: 'ready_to_run', question: '', target: content, output: '任务 workspace/output/任务说明.md', network: '需要联网调用 DeepSeek 生成结果说明', summary: content }
+  const raw = await callDeepSeek([
+    { role: 'system', content: `你是任务澄清与执行预览助手。一次只提出一个问题；当目标、范围和产物足够明确时返回 ready_to_run，否则返回 ask_question。只返回 JSON，不要思维过程，不要 shell 命令。输出 ${locale === 'en' ? 'English' : '简体中文'}。` },
+    { role: 'user', content: JSON.stringify({ original_prompt: task.prompt, previous_turns: task.turns, latest_answer: content, output_schema: { next_action: 'ready_to_run | ask_question', question: 'string', target: 'string', output: 'string', network: 'string', summary: 'string' } }) },
+  ])
+  if (raw === null) {
+    if (allowMockModel) return fallback
+    throw new Error('未配置 DEEPSEEK_API_KEY，无法生成实时澄清结果')
+  }
+  return validatePlan(modelJson(raw))
+}
+
+async function generateResult(task, files, locale = 'zh') {
+  const fallback = { summary: `已完成“${task.title}”，原始文件未修改。`, suggestions: ['请打开 output 文件夹检查主要产物。', '如有遗漏，可以在本任务中提交反馈。'], feedbackOptions: ['文件找错了', '内容不准确', '格式或排版不合适', '漏掉了一些内容', '我想换一种做法', '其他问题'], markdown: '' }
+  const metadata = files.slice(0, 80).map(file => ({ name: file.name, extension: file.extension, size: file.size, modifiedAt: file.modifiedAt }))
+  const raw = await callDeepSeek([
+    { role: 'system', content: `你是本地任务结果审阅助手。根据任务和文件元数据，生成给中老年用户看的简短结果说明、最多五条下一步建议、二到七条反馈选项，以及一段 Markdown 报告正文。不要虚构已执行的操作，不要输出思维过程或命令。只返回 JSON，语言为 ${locale === 'en' ? 'English' : '简体中文'}。` },
+    { role: 'user', content: JSON.stringify({ task: { title: task.title, prompt: task.prompt, confirmed_turns: task.turns }, files: metadata, output_schema: { summary: 'string', suggestions: ['string'], feedback_options: ['string'], markdown: 'string' } }) },
+  ])
+  if (raw === null) {
+    if (allowMockModel) return fallback
+    throw new Error('未配置 DEEPSEEK_API_KEY，无法生成实时结果建议')
+  }
+  return validateResult(modelJson(raw))
+}
+
+async function generateRevision(task, category, comment, locale = 'zh') {
+  const raw = await callDeepSeek([
+    { role: 'system', content: `你是任务修改助手。根据用户对结果的反馈，生成下一轮唯一需要确认的问题。只返回 JSON，不要思维过程，语言为 ${locale === 'en' ? 'English' : '简体中文'}。` },
+    { role: 'user', content: JSON.stringify({ task: task.title, feedback: category, comment, output_schema: { question: 'string' } }) },
+  ])
+  if (raw === null) {
+    if (allowMockModel) return { question: `你希望我如何处理“${category}”？` }
+    throw new Error('未配置 DEEPSEEK_API_KEY，无法生成实时修改问题')
+  }
+  return { question: requireString(modelJson(raw).question, '修改问题') }
 }
 
 async function listFiles(root, depth = 0, limit = 80, result = []) {
@@ -94,7 +192,7 @@ async function listFiles(root, depth = 0, limit = 80, result = []) {
   return result
 }
 
-async function runTask(task, scope = {}) {
+async function runTask(task, scope = {}, locale = 'zh') {
   const workspace = task.workspacePath ?? await createWorkspace(task.title)
   const searchRoots = Array.isArray(scope.roots) && scope.roots.length ? scope.roots : [desktop, path.join(os.homedir(), 'Downloads')]
   const files = []
@@ -102,15 +200,16 @@ async function runTask(task, scope = {}) {
   const unique = [...new Map(files.map(file => [file.path, file])).values()]
   const outputName = `${slug(task.title)}-任务说明.md`
   const outputPath = path.join(workspace, 'output', outputName)
-  const report = `# ${task.title}\n\n- 生成时间：${now()}\n- 搜索位置：${searchRoots.join('、')}\n- 找到文件：${unique.length} 个\n- 原文件：未修改（所有操作都在 workspace 内完成）\n\n## 文件摘要\n\n${unique.slice(0, 30).map(file => `- ${file.name}（${Math.ceil(file.size / 1024)} KB）\n  - ${file.path}`).join('\n') || '- 暂未找到可列出的文件'}\n\n## 下一步建议\n\n请打开此任务文件夹，检查 output/ 中的结果。原始文件仍在原位置。`
+  const narrative = await generateResult(task, unique, locale)
+  const report = `# ${task.title}\n\n${narrative.markdown}\n\n## 文件摘要\n\n${unique.slice(0, 30).map(file => `- ${file.name}（${Math.ceil(file.size / 1024)} KB）\n  - ${file.path}`).join('\n') || '- 暂未找到可列出的文件'}\n\n## 下一步建议\n\n${narrative.suggestions.map(item => `- ${item}`).join('\n')}`
   await fs.writeFile(outputPath, report, 'utf8')
   await fs.writeFile(path.join(workspace, 'logs', 'execution.jsonl'), `${JSON.stringify({ at: now(), tool: 'list_files', count: unique.length })}\n`, 'utf8')
-  const updated = { ...task, status: 'COMPLETED', stage: 'completed', updatedAt: now(), workspacePath: workspace, foundFiles: unique.length, completedSteps: 5, elapsedSeconds: Math.max(4, unique.length), artifacts: [{ id: id('artifact'), name: outputName, path: outputPath, kind: 'markdown', size: Buffer.byteLength(report), generatedAt: now(), version: task.version }], events: [...task.events, event('task.progress', '正在查找文件', { foundFiles: unique.length }), event('task.completed', '已经完成，结果已放入任务文件夹')], version: task.version }
+  const updated = { ...task, status: 'COMPLETED', stage: 'completed', updatedAt: now(), workspacePath: workspace, foundFiles: unique.length, completedSteps: 5, elapsedSeconds: Math.max(4, unique.length), resultSummary: narrative.summary, suggestions: narrative.suggestions, feedbackOptions: narrative.feedbackOptions, artifacts: [{ id: id('artifact'), name: outputName, path: outputPath, kind: 'markdown', size: Buffer.byteLength(report), generatedAt: now(), version: task.version }], events: [...task.events, event('task.progress', '正在查找文件', { foundFiles: unique.length }), event('task.completed', '已经完成，结果已放入任务文件夹')], version: task.version }
   return updated
 }
 
-async function callDeepSeek(messages, apiKey) {
-  const key = apiKey || process.env.DEEPSEEK_API_KEY
+async function callDeepSeek(messages) {
+  const key = process.env.DEEPSEEK_API_KEY
   if (!key) return null
   const response = await fetch('https://api.deepseek.com/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` }, body: JSON.stringify({ model: 'deepseek-chat', messages, temperature: 0.2, response_format: { type: 'json_object' } }) })
   if (!response.ok) throw new Error(`DeepSeek request failed (${response.status})`)
@@ -128,16 +227,20 @@ async function parseBody(req) {
 async function route(req, url) {
   const body = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await parseBody(req) : {}
   const tasks = await readTasks()
-  if (req.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'ai-for-the-old-local', version: '0.1.0' })
-  if (req.method === 'GET' && url.pathname === '/api/tasks') return json(tasks.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(task => (task.status === 'CLARIFYING' || task.status === 'REVISION') ? { ...task, candidates: candidates(task.prompt) } : task))
+  if (req.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'ai-for-the-old-local', version: '0.1.1', deepseekConfigured: Boolean(process.env.DEEPSEEK_API_KEY) })
+  if (req.method === 'GET' && url.pathname === '/api/account/status') return json({ provider: 'DeepSeek', apiConfigured: Boolean(process.env.DEEPSEEK_API_KEY), webLoginTransfer: false, balance: null, billing: 'official_platform_only' })
+  if (req.method === 'GET' && url.pathname === '/api/tasks') return json(tasks.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(task => ({ ...task, candidateOptions: task.candidateOptions ?? [] })))
   if (req.method === 'POST' && url.pathname === '/api/tasks') {
     if (typeof body.prompt !== 'string' || !body.prompt.trim()) return json({ code: 'prompt_required', message: '请先告诉我想完成什么事' }, 400)
-    const task = await createTask(body.prompt)
+    const locale = body.locale === 'en' ? 'en' : 'zh'
+    const candidateOptions = await generateCandidates(body.prompt, locale)
+    const task = await createTask(body.prompt, candidateOptions)
+    task.locale = locale
     tasks.push(task); await writeTasks(tasks)
-    return json({ task, candidates: candidates(body.prompt) }, 201)
+    return json({ task, candidates: candidateOptions }, 201)
   }
   if (req.method === 'POST' && url.pathname === '/api/deepseek/chat') {
-    try { return json({ content: await callDeepSeek(body.messages ?? [], body.apiKey) }) }
+    try { return json({ content: await callDeepSeek(body.messages ?? []) }) }
     catch (error) { return json({ code: 'deepseek_error', message: error instanceof Error ? error.message : 'DeepSeek 暂时无法连接' }, 502) }
   }
   const match = url.pathname.match(/^\/api\/tasks\/([^/]+)(?:\/([^/]+))?$/)
@@ -150,9 +253,12 @@ async function route(req, url) {
   if (req.method === 'POST' && action === 'clarifications') {
     const content = String(body.content ?? '').trim()
     if (!content) return json({ code: 'content_required', message: '请先选择一个方向或补充说明' }, 400)
-    const next = { ...task, status: 'READY_TO_RUN', stage: 'ready', updatedAt: now(), turns: [...task.turns, { id: id('turn'), role: 'user', content, createdAt: now() }], events: [...task.events, event('clarification.confirmed', '已确认任务目标')] }
+    const locale = body.locale === 'en' ? 'en' : task.locale ?? 'zh'
+    const plan = await generatePlan(task, content, locale)
+    const assistantTurn = plan.nextAction === 'ask_question' ? { id: id('turn'), role: 'assistant', content: plan.question, createdAt: now() } : null
+    const next = { ...task, locale, status: plan.nextAction === 'ask_question' ? 'CLARIFYING' : 'READY_TO_RUN', stage: plan.nextAction === 'ask_question' ? 'clarifying' : 'ready', pendingQuestion: plan.nextAction === 'ask_question' ? plan.question : undefined, modelSummary: plan.summary, updatedAt: now(), turns: [...task.turns, { id: id('turn'), role: 'user', content, createdAt: now() }, ...(assistantTurn ? [assistantTurn] : [])], events: [...task.events, event(plan.nextAction === 'ask_question' ? 'clarification.question' : 'clarification.confirmed', plan.nextAction === 'ask_question' ? 'DeepSeek 正在继续确认一个问题' : 'DeepSeek 已确认任务目标')] }
     tasks[index] = next; await writeTasks(tasks)
-    return json({ task: next, preview: { target: content, roots: [desktop, path.join(os.homedir(), 'Downloads')], output: '任务 workspace/output/任务说明.md', network: '仅在你配置 DeepSeek API key 时联网' } })
+    return json({ task: next, preview: plan.nextAction === 'ready_to_run' ? { target: plan.target, roots: [desktop, path.join(os.homedir(), 'Downloads')], output: plan.output, network: plan.network, summary: plan.summary } : null, question: plan.question || undefined })
   }
   if (req.method === 'POST' && action === 'access-scope') {
     const next = { ...task, accessScope: { roots: body.roots ?? [desktop, path.join(os.homedir(), 'Downloads')], network: Boolean(body.network), agreedAt: now() }, status: 'ACCESS_PENDING', stage: 'access', updatedAt: now(), events: [...task.events, event('access.approved', '已记录本次任务的访问范围')] }
@@ -160,13 +266,16 @@ async function route(req, url) {
   }
   if (req.method === 'POST' && action === 'run') {
     if (!['READY_TO_RUN', 'ACCESS_PENDING', 'PAUSED', 'FAILED'].includes(task.status)) return json({ code: 'task_not_ready', message: '这个任务还没有准备好执行' }, 409)
-    const next = await runTask({ ...task, status: 'RUNNING', stage: 'running' }, task.accessScope ?? body)
+    const next = await runTask({ ...task, status: 'RUNNING', stage: 'running' }, task.accessScope ?? body, task.locale ?? 'zh')
     tasks[index] = next; await writeTasks(tasks); return json(next)
   }
   if (req.method === 'POST' && action === 'feedback') {
     const category = String(body.category ?? '').trim()
     if (!category) return json({ code: 'feedback_required', message: '请选择一项反馈' }, 400)
-    const next = { ...task, status: category === '没有问题，完成得很好' ? 'COMPLETED' : 'REVISION', stage: category === '没有问题，完成得很好' ? 'completed' : 'clarifying', updatedAt: now(), feedback: [...task.feedback, { id: id('feedback'), category, comment: String(body.comment ?? ''), createdAt: now() }], events: [...task.events, event('feedback.received', category)] }
+    const comment = String(body.comment ?? '')
+    const satisfied = Boolean(body.good) || category === '没有问题，完成得很好'
+    const revision = satisfied ? null : await generateRevision(task, category, comment, task.locale ?? 'zh')
+    const next = { ...task, status: satisfied ? 'COMPLETED' : 'REVISION', stage: satisfied ? 'completed' : 'clarifying', pendingQuestion: revision?.question, updatedAt: now(), feedback: [...task.feedback, { id: id('feedback'), category, comment, createdAt: now() }], turns: revision ? [...task.turns, { id: id('turn'), role: 'assistant', content: revision.question, createdAt: now() }] : task.turns, events: [...task.events, event('feedback.received', category)] }
     tasks[index] = next; await writeTasks(tasks); return json(next)
   }
   return json({ code: 'method_not_allowed', message: '不支持这个操作' }, 405)
@@ -179,8 +288,10 @@ const httpServer = createServer(async (req, res) => {
     res.writeHead(result.status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type' })
     res.end(result.body)
   } catch (error) {
-    res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
-    res.end(JSON.stringify({ code: 'internal_error', message: error instanceof Error ? error.message : '本地服务发生错误' }))
+    const message = error instanceof Error ? error.message : '本地服务发生错误'
+    const providerFailure = message.includes('DeepSeek') || message.includes('DEEPSEEK_API_KEY')
+    res.writeHead(providerFailure ? 503 : 500, { 'content-type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify({ code: providerFailure ? 'deepseek_unavailable' : 'internal_error', message }))
   }
 })
 
@@ -188,4 +299,4 @@ if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
   httpServer.listen(port, '127.0.0.1', () => console.log(`AI for the old local API listening on http://127.0.0.1:${port}`))
 }
 
-export { allowedTools, candidates, createTask, listFiles, slug, httpServer }
+export { allowedTools, fallbackCandidates, createTask, generateCandidates, generatePlan, generateResult, listFiles, slug, httpServer }

@@ -17,7 +17,7 @@ async function waitForServer() {
 
 describe('local task engine', () => {
   beforeAll(async () => {
-    server = spawn(process.execPath, ['app/server/index.mjs'], { env: { ...process.env, NODE_ENV: '', VITEST: '', AI_OLD_API_PORT: String(port) }, stdio: 'ignore' })
+    server = spawn(process.execPath, ['app/server/index.mjs'], { env: { ...process.env, NODE_ENV: '', VITEST: '', AI_OLD_ALLOW_MOCK: 'true', AI_OLD_API_PORT: String(port) }, stdio: 'ignore' })
     await waitForServer()
   })
   afterAll(() => server.kill())

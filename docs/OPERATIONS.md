@@ -1,25 +1,32 @@
 # Operations and Maintenance Guide
 
-This document describes the supported local deployment, data model, recovery procedure, test gates, and release process for AI for the old. It is intentionally independent of a developer's machine so that another maintainer can reproduce a release from a clean checkout.
+This document is the reproducible, English-language maintenance contract for AI for the old. It describes the supported runtime, provider boundary, data layout, recovery procedure, quality gates, and release process. It is written so a maintainer can reproduce a release from a clean checkout without relying on a developer machine.
 
-## Scope and architecture
+## Architecture
 
-The root application has two processes during development:
+The development application has two local processes:
 
-1. Vite serves the React client on `127.0.0.1:5173` (or the next available Vite port) and proxies `/api` requests.
+1. Vite serves the React client on `127.0.0.1:4178`.
 2. `app/server/index.mjs` serves the loopback-only API on `127.0.0.1:4179`.
 
-The API is the owner of task state, workspace creation, file metadata scanning, report generation, and the optional DeepSeek adapter. The browser never receives an API key. The service writes an append-style execution record to `logs/execution.jsonl` and an atomic JSON task snapshot to `app/data/tasks.json` (ignored by git).
+The API owns task state, workspace creation, file metadata scanning, report generation, provider calls, and persistence. The browser never receives an API key. The Electron main process starts the same API and loads the built `dist/index.html` from a packaged application. Packaged data is stored under Electron's per-user data directory; workspaces remain under the user's Desktop.
 
-The included `deepseek-harness/` directory is the upstream DeepSeek Harness source tree. It is kept as a source reference and integration base; the root product does not modify its upstream git metadata.
+All model-facing interactions use the DeepSeek `deepseek-chat` endpoint with JSON mode:
+
+`POST https://api.deepseek.com/chat/completions`
+
+The service validates candidate, plan, result, and revision responses before persisting them. It never executes model-generated commands. `AI_OLD_ALLOW_MOCK=true` is test-only behavior; production must use `DEEPSEEK_API_KEY`.
+
+The included `deepseek-harness/` directory is the upstream source reference and keeps its own license. The root `app/` directory is the product shell described by the design document.
 
 ## Reproducible setup
 
 Prerequisites:
 
-- Node.js 22 or later (Node 24 is recommended for this repository).
+- Node.js 22 or later (the CI and release workflows use Node 22).
 - npm 10 or later.
-- A macOS or Windows account with a Desktop and Downloads directory for a real file-indexing run.
+- A macOS or Windows account with Desktop and Downloads directories for a real indexing run.
+- A DeepSeek API key for non-test task generation.
 
 From a clean checkout:
 
@@ -28,33 +35,51 @@ npm ci
 npm run check
 npm test
 npm run build
-npm run dev
 ```
 
-`npm ci` uses the committed `package-lock.json` and therefore does not silently update dependency ranges. When outbound package access requires the configured proxy, set `HTTP_PROXY` and `HTTPS_PROXY` to `http://127.0.0.1:6268` for the install command only. The app itself does not require a proxy to serve local files.
-
-To enable the official provider for a local run, export the key in the shell that starts the API:
+For a local provider-backed run:
 
 ```bash
 DEEPSEEK_API_KEY='sk-...' npm run dev
 ```
 
-Never put the key in `.env`, a task snapshot, a screenshot, a commit, or an issue. The server sends only the explicitly requested DeepSeek chat messages and uses the fixed `deepseek-chat` model in this adapter.
+The optional package proxy is `http://127.0.0.1:6268`:
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:6268 HTTP_PROXY=http://127.0.0.1:6268 npm ci
+```
+
+The Node service does not log authorization headers. Never put a key in `.env`, source files, task snapshots, screenshots, issue comments, or commits. If a key is pasted into a chat or terminal transcript, rotate it after validation.
+
+## Model contract and provider limits
+
+The following calls are required for a complete production flow:
+
+| Flow stage | Server function | Required JSON response |
+| --- | --- | --- |
+| Intent candidates | `generateCandidates` | `candidates[]` with `title`, `description`, `needs` (1-3 items) |
+| Clarification | `generatePlan` | `next_action`, `question`, `target`, `output`, `network`, `summary` |
+| Result | `generateResult` | `summary`, `suggestions[]`, `feedback_options[]`, `markdown` |
+| Feedback | `generateRevision` | `question` |
+
+The API key is read from the service process only. The endpoint that accepts chat messages does not accept a key from the request body. The UI's QR entry opens the official web sign-in page, but does not import cookies or convert a web session into an API credential.
+
+DeepSeek's public API documentation does not expose a supported API for web-session transfer, account balance, recharge, or payment. The account screen intentionally reports `balance: null` and links to the official platform. Do not add scraping, cookie extraction, card handling, or locally fabricated credit. Such a change would require an official documented provider API, a threat model, and a separate review.
 
 ## Local data and workspace contract
 
-Every task creates the following directory under `~/Desktop/AI for the old/<slug>-YYYY-MM-DD/`:
+Each task creates `~/Desktop/AI for the old/<slug>-YYYY-MM-DD/` with:
 
 | Directory | Purpose | Safe to remove |
 | --- | --- | --- |
 | `input/` | copied or linked source material when a future tool uses it | yes, after review |
 | `work/` | intermediate files | yes |
-| `output/` | user-facing artifacts and `任务说明.md` | only after saving desired results |
-| `logs/` | append-only tool summaries | yes, after export |
+| `output/` | user-facing Markdown artifacts | only after saving desired results |
+| `logs/` | append-only execution summaries | yes, after export |
 
-The current MVP report generator indexes metadata only and does not modify the source file. It limits recursion depth and result count, skips hidden directories and `node_modules`, and records absolute paths in the task report so the user can check the result. Future tools must remain in the explicit allowlist in `app/server/index.mjs`; adding a general shell or delete tool is a security change and requires new tests and a design review.
+The development task snapshot is `app/data/tasks.json`, ignored by Git. Electron sets `AI_OLD_DATA_DIR` to its user-data directory so installed apps do not write into the packaged application. Both locations use atomic temporary-file-then-rename writes.
 
-Task snapshots contain the prompt, clarification turns, status, event labels, artifact paths, and feedback. They do not contain API keys. To back up local history, stop the API and copy `app/data/tasks.json` plus the relevant Desktop workspace folders. Restore by putting the snapshot back before starting the service. The write path uses a temporary file and rename to avoid half-written JSON after a process interruption.
+The current execution path indexes metadata only, limits recursion depth and result count, skips hidden directories and `node_modules`, and does not modify source files. New tools must be explicit entries in `allowedTools` and must have tests. A general shell, delete, or unrestricted network tool is outside this contract.
 
 ## State and recovery
 
@@ -62,39 +87,50 @@ The supported state sequence is:
 
 `CLARIFYING → READY_TO_RUN → ACCESS_PENDING → RUNNING → COMPLETED`
 
-`REVISION` returns to clarification while preserving the previous artifact version. `FAILED` keeps any workspace files already created and can be retried. The UI does not expose model chain-of-thought; it shows stage labels, counts, elapsed time, and result paths only.
+`REVISION` returns to clarification while preserving the previous artifact. `FAILED` keeps workspace files already created and can be retried. The UI never displays model chain-of-thought; it displays stages, timing, counts, and result paths.
 
-If the browser is closed, restart `npm run dev` and open Task history. If the API is unavailable, the top bar changes to “Local service is offline”; no task is silently discarded. If a task is interrupted while scanning, remove only the unfinished `work/` directory after reviewing `output/`, then retry from the task page. Do not delete the original source files to recover a task.
+If the browser or desktop window closes, restart the app and open Task history. If the API is offline, no task is silently discarded. If scanning is interrupted, inspect `output/` first and remove only the unfinished `work/` directory before retrying. Never delete source files as a recovery action.
 
 ## Quality gates
 
-Run all gates before a commit or release:
+Run all gates before every commit and release:
 
 ```bash
 npm run check       # strict TypeScript client check
-npm test            # loopback API integration tests
+npm test            # loopback API integration tests (mock provider enabled in child process)
 npm run build       # production Vite bundle
+npm run desktop:dir # local Electron packaging smoke check
+git diff --check
 ```
 
-The tests intentionally start the real local API in a child process. They verify loopback health, the three-candidate limit, task creation, and the clarification transition. Add tests whenever a new state, tool, persistence field, or provider behavior is introduced. For UI changes, manually check keyboard focus, 18px default text, the 125% text toggle, high contrast, narrow viewport layout, and the bilingual copy.
+The tests start the real local API in a child process and deliberately set `AI_OLD_ALLOW_MOCK=true`; they never use a production key. Add tests for every new state, persistence field, provider contract, and tool boundary. For UI changes, manually check keyboard focus, large text mode, high contrast, narrow viewport layout, bilingual copy, and packaged file-mode API access.
 
 ## Release process
 
-The root repository is the product repository. Release tags use semantic versions such as `v0.1.0`.
+The root repository is the product repository. Semantic tags use the form `vMAJOR.MINOR.PATCH`.
 
-1. Run the three quality gates from a clean working tree.
-2. Review `git diff --check`, `git status`, and the generated `dist/` bundle.
-3. Update `package.json` and `package-lock.json` together, then commit with a concise release message.
-4. Push the branch and tag over the configured GitHub SSH remote.
-5. Create a GitHub release whose notes include the tested Node version, commit SHA, known limitations, and whether `DEEPSEEK_API_KEY` was used. Do not attach task data or credentials.
+1. Run the quality gates from a clean checkout.
+2. Update `package.json` and `package-lock.json` together when dependencies or version change.
+3. Commit and push `main`, then push the version tag over the configured SSH remote.
+4. The `Desktop release` workflow builds macOS `.dmg` and Windows NSIS `.exe` installers on native GitHub runners and attaches them to the tag release. It can also be started manually with an existing `tag` input.
+5. Verify the release assets and checksums from the GitHub release page. Release notes must include the commit SHA, Node version, quality-gate results, known limitations, and whether a provider key was used. Never attach task data or credentials.
 
-The CI workflow runs the same install, type check, test, and build commands on Ubuntu. A future native desktop packaging job can consume the `dist/` bundle and the loopback service; it must preserve the same workspace and credential contracts and must be tested on both macOS and Windows before being marked stable.
+Local commands are:
+
+```bash
+npm run desktop:mac   # native macOS .dmg
+npm run desktop:win   # native Windows .exe
+npm run desktop:dir   # unpacked current-platform check
+```
+
+Cross-platform installers must be built on their native runner. Do not claim a release is installable until both workflow jobs have uploaded a non-empty artifact.
 
 ## Security checklist
 
-- The API binds to loopback and must not be changed to `0.0.0.0` without authentication and a threat-model update.
-- File roots come from the approved task scope; original files are copied or read, not overwritten.
-- No model-generated command is passed to a shell.
-- DeepSeek uploads are opt-in and should include only the minimum text needed for clarification.
-- QR login opens the official `platform.deepseek.com` page; this repository does not store DeepSeek session cookies or payment secrets.
-- Payment and top-up cards are deliberately demo-only until a verified server-side payment provider is configured; the client never credits a balance from its own callback.
+- Bind the API to loopback; changing it to `0.0.0.0` requires authentication and a threat-model update.
+- Treat file roots as an explicit user-approved scope.
+- Never pass model-generated text to a shell.
+- Send only minimum necessary metadata and text to DeepSeek after the user approves network access.
+- Keep API keys in the service environment and out of renderer state, localStorage, logs, snapshots, and Git.
+- Keep QR login as an official-link convenience only; do not read browser cookies.
+- Do not implement balance, recharge, or payment callbacks without an official documented provider contract.
