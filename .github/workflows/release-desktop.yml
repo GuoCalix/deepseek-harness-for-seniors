@@ -24,7 +24,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run desktop:mac -- --x64
+      - run: npm run desktop:mac -- --x64 --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: macos-installer
@@ -41,7 +41,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run desktop:win -- --x64
+      - run: npm run desktop:win -- --x64 --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installer

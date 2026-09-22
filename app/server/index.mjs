@@ -227,7 +227,7 @@ async function parseBody(req) {
 async function route(req, url) {
   const body = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await parseBody(req) : {}
   const tasks = await readTasks()
-  if (req.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'ai-for-the-old-local', version: '0.1.1', deepseekConfigured: Boolean(process.env.DEEPSEEK_API_KEY) })
+  if (req.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'ai-for-the-old-local', version: '0.1.2', deepseekConfigured: Boolean(process.env.DEEPSEEK_API_KEY) })
   if (req.method === 'GET' && url.pathname === '/api/account/status') return json({ provider: 'DeepSeek', apiConfigured: Boolean(process.env.DEEPSEEK_API_KEY), webLoginTransfer: false, balance: null, billing: 'official_platform_only' })
   if (req.method === 'GET' && url.pathname === '/api/tasks') return json(tasks.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(task => ({ ...task, candidateOptions: task.candidateOptions ?? [] })))
   if (req.method === 'POST' && url.pathname === '/api/tasks') {
