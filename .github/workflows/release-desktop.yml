@@ -6,9 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to build and publish
+        description: Git ref to build (use a version tag when publishing)
         required: true
-        default: v0.1.3
+        default: v0.1.4
+      publish:
+        description: Publish installers after all checks pass
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -83,6 +87,7 @@ jobs:
         run: npm run test:desktop
         env:
           AI_OLD_TEST_EXECUTABLE: ${{ github.workspace }}/release/win-unpacked/AI for the old.exe
+          DEBUG: pw:browser
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installer
@@ -91,6 +96,7 @@ jobs:
 
   publish:
     needs: [macos, windows]
+    if: github.event_name != 'workflow_dispatch' || inputs.publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

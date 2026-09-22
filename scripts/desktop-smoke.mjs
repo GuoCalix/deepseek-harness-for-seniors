@@ -6,9 +6,11 @@ import assert from 'node:assert/strict'
 
 const directory = await mkdtemp(path.join(os.tmpdir(), 'ai-old-desktop-smoke-'))
 const executablePath = process.env.AI_OLD_TEST_EXECUTABLE
+const testEnvironment = { ...process.env, DEEPSEEK_API_KEY: '', DEEPSEEK_PLATFORM_ORIGIN: 'https://platform.deepseek.com', DEEPSEEK_INFERENCE_ORIGIN: 'https://api.deepseek.com', AI_OLD_USER_DATA: path.join(directory, 'user-data'), AI_OLD_DATA_DIR: path.join(directory, 'data'), AI_OLD_WORKSPACE_ROOT: path.join(directory, 'workspace'), AI_OLD_ALLOW_MOCK: 'true' }
+delete testEnvironment.ELECTRON_RUN_AS_NODE
 const application = await electron.launch({
-  ...(executablePath ? { executablePath, args: [] } : { args: ['.'] }),
-  env: { ...process.env, ELECTRON_RUN_AS_NODE: '', DEEPSEEK_API_KEY: '', DEEPSEEK_PLATFORM_ORIGIN: 'https://platform.deepseek.com', DEEPSEEK_INFERENCE_ORIGIN: 'https://api.deepseek.com', AI_OLD_USER_DATA: path.join(directory, 'user-data'), AI_OLD_DATA_DIR: path.join(directory, 'data'), AI_OLD_WORKSPACE_ROOT: path.join(directory, 'workspace'), AI_OLD_ALLOW_MOCK: 'true' },
+  ...(executablePath ? { executablePath: path.resolve(executablePath), args: [] } : { args: ['.'] }),
+  env: testEnvironment,
   timeout: 30_000,
 })
 try {
@@ -44,6 +46,8 @@ try {
   if (root) { await mkdir(root, { recursive: true }); await page.screenshot({ path: path.join(root, 'desktop-login.png') }) }
   console.log(JSON.stringify({ packaged: Boolean(executablePath), rendered: true, ipcPost: true, secureStorage: encryption ? 'passed' : 'skipped-explicitly', candidates: count, clarification: true, login: true, rendererErrors: errors.length }))
 } finally {
-  await application.close()
+  const terminate = setTimeout(() => application.process().kill('SIGKILL'), 5000)
+  try { await application.close() } catch { /* A locked keychain can delay process shutdown. */ }
+  clearTimeout(terminate)
   await rm(directory, { recursive: true, force: true })
 }

@@ -268,7 +268,7 @@ async function parseBody(req) {
 async function route(req, url) {
   const body = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await parseBody(req) : {}
   const tasks = await readTasks()
-  if (req.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'ai-for-the-old-local', version: '0.1.3', deepseekConfigured: Boolean(process.env.DEEPSEEK_API_KEY) })
+  if (req.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'ai-for-the-old-local', version: '0.1.4', deepseekConfigured: Boolean(process.env.DEEPSEEK_API_KEY) })
   if (req.method === 'GET' && url.pathname === '/api/account/status') return json(await accountStatus(url.searchParams.get('refresh') === '1'))
   if (req.method === 'POST' && url.pathname === '/api/account/login/start') return json(await initializeAccount().start(body.locale === 'en' ? 'en' : 'zh'))
   if (req.method === 'POST' && url.pathname === '/api/account/login/cancel') { await initializeAccount().cancel(); return json(await accountStatus()) }
