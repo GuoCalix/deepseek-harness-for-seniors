@@ -49,7 +49,7 @@ npm run desktop:win -- --x64
 
 ### 本次验证与边界
 
-v0.1.4 修复相对资源加载、固定端口冲突及桌面跨域请求；桌面页面使用受限 IPC。2026-09-23 在本机实际启动 arm64 打包应用，验证页面、任务创建、澄清和系统加密存储，渲染错误为 0。四次真实 API key 调用验证候选、澄清、结果和反馈，共 1,485 tokens；官方余额查询成功。
+v0.1.4 修复相对资源加载、固定端口冲突及桌面跨域请求；桌面页面使用受限 IPC。2026-09-23，Apple Silicon、Intel Mac 和 Windows 的实际打包应用均通过 [CI 验证](https://github.com/GuoCalix/deepseek-harness-for-seniors/actions/runs/35762172897)：页面、任务创建、澄清和系统加密存储通过，渲染错误为 0。本机最终 arm64 包通过页面和 IPC 检查；因锁屏等待 Keychain 授权，本机此轮明确跳过加密检查。四次真实 API key 调用验证候选、澄清、结果和反馈，共 1,485 tokens；官方余额查询成功。
 
 官方 PKCE 初始化及微信扫码页已验证。手机扫码后的真实账号 grant、账号钱包及最终支付到账尚需用户交互验收；自动化协议测试使用明确标记的测试数据，不能替代这些真实账号验收。
 
@@ -104,7 +104,7 @@ Dependency downloads may use `HTTPS_PROXY=http://127.0.0.1:6268` and `HTTP_PROXY
 
 ### Verification and remaining acceptance work
 
-v0.1.4 fixes packaged asset paths, fixed-port conflicts and cross-origin desktop requests through restricted IPC. On 2026-09-23, the actual arm64 packaged app passed rendering, task creation, clarification and system encryption checks with zero renderer errors. Four live API-key requests validated candidates, clarification, results and feedback, totaling 1,485 tokens. Official balance queries succeeded.
+v0.1.4 fixes packaged asset paths, fixed-port conflicts and cross-origin desktop requests through restricted IPC. On 2026-09-23, actual Apple Silicon, Intel Mac and Windows packaged apps passed [CI validation](https://github.com/GuoCalix/deepseek-harness-for-seniors/actions/runs/35762172897): rendering, task creation, clarification and system encryption, with zero renderer errors. The final local arm64 package passed rendering and IPC; that local run explicitly skipped encryption because the locked Mac required Keychain approval. Four live API-key requests validated candidates, clarification, results and feedback, totaling 1,485 tokens. Official balance queries succeeded.
 
 Live PKCE initialization and the official WeChat QR page were verified. Real account-grant inference, account-wallet retrieval and settled payment still require user interaction for acceptance. Protocol fixture tests do not stand in for those checks.
 

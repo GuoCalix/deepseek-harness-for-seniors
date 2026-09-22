@@ -132,7 +132,8 @@ For an explicitly authorized live API-key test, run `node scripts/live-verify.mj
 
 Recorded on 2026-09-23:
 
-- Local arm64 packaged app: renderer and IPC smoke passed, system encryption round-trip passed, zero renderer errors.
+- Apple Silicon, Intel Mac and Windows packaged apps: renderer, IPC, task creation, clarification, account dialog and actual OS encryption round-trip passed in [validation run 35762172897](https://github.com/GuoCalix/deepseek-harness-for-seniors/actions/runs/35762172897), with zero renderer errors. No crypto skip flag was set in CI. Mac architecture and ad-hoc signature checks passed.
+- Final local arm64 package: renderer and IPC smoke passed, zero renderer errors. The locked local Mac required Keychain approval, so this run explicitly skipped encryption; the development app had passed an asynchronous system encryption round-trip earlier. Do not conflate that local limitation with the full native CI results.
 - Real API-key flow: four calls, 958 input + 527 output = 1,485 exact tokens; official balance read succeeded.
 - Real Platform authorization initialization: HTTP 200 with expected fields; official Harness sign-in and WeChat QR page reached.
 - Pending: user phone confirmation, real account-grant inference/wallet, and a paid top-up settlement. Fixture results are not evidence for those steps.
