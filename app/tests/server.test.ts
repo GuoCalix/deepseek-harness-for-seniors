@@ -1,7 +1,11 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { mkdtemp, rm } from 'node:fs/promises'
+import path from 'node:path'
+import os from 'node:os'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-const port = 4180
+let port: number
+let directory: string
 let server: ChildProcess
 
 async function waitForServer() {
@@ -17,14 +21,34 @@ async function waitForServer() {
 
 describe('local task engine', () => {
   beforeAll(async () => {
-    server = spawn(process.execPath, ['app/server/index.mjs'], { env: { ...process.env, NODE_ENV: '', VITEST: '', AI_OLD_ALLOW_MOCK: 'true', AI_OLD_API_PORT: String(port) }, stdio: 'ignore' })
+    directory = await mkdtemp(path.join(os.tmpdir(), 'ai-old-api-test-'))
+    server = spawn(process.execPath, ['app/server/index.mjs'], { env: { ...process.env, NODE_ENV: '', VITEST: '', DEEPSEEK_API_KEY: '', AI_OLD_DESKTOP: '', AI_OLD_DATA_DIR: directory, AI_OLD_WORKSPACE_ROOT: path.join(directory, 'workspace'), AI_OLD_ALLOW_MOCK: 'true', AI_OLD_API_PORT: '0' }, stdio: ['ignore', 'pipe', 'pipe'] })
+    await new Promise<void>((resolve, reject) => {
+      server.stdout!.on('data', data => { const match = String(data).match(/127\.0\.0\.1:(\d+)/); if (match) { port = Number(match[1]); resolve() } })
+      server.once('exit', () => reject(new Error('Test API exited before listening')))
+    })
     await waitForServer()
   })
-  afterAll(() => server.kill())
+  afterAll(async () => { const stopped = new Promise(resolve => server.once('exit', resolve)); server.kill(); await stopped; await rm(directory, { recursive: true, force: true }) })
 
   it('reports a healthy local service', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/api/health`)
     expect(await response.json()).toMatchObject({ ok: true, service: 'ai-for-the-old-local' })
+  })
+
+  it('keeps account credentials out of the renderer projection', async () => {
+    const response = await fetch(`http://127.0.0.1:${port}/api/account/status`)
+    const body = await response.json() as { account: { status: string }; balance: unknown; usage: { requests: number } }
+    expect(body.account.status).toBe('signed-out')
+    expect(body.balance).toBeNull()
+    expect(body.usage).toHaveProperty('requests')
+  })
+
+  it('rejects cross-site writes and text/plain submissions before routing', async () => {
+    const forbidden = await fetch(`http://127.0.0.1:${port}/api/tasks`, { method: 'POST', headers: { origin: 'https://untrusted.example', 'content-type': 'application/json' }, body: JSON.stringify({ prompt: 'test' }) })
+    expect(forbidden.status).toBe(403)
+    const form = await fetch(`http://127.0.0.1:${port}/api/tasks`, { method: 'POST', body: JSON.stringify({ prompt: 'test' }) })
+    expect(form.status).toBe(415)
   })
 
   it('offers no more than three intent candidates', async () => {

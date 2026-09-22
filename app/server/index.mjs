@@ -3,18 +3,40 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
+import { Readable } from 'node:stream'
+import { createAccountService } from './account.mjs'
+import { credentialStore } from './storage.mjs'
+import { usageStore } from './usage.mjs'
+import { origin, requestJson } from './network.mjs'
 
 const port = Number(process.env.AI_OLD_API_PORT ?? 4179)
 const dataDir = process.env.AI_OLD_DATA_DIR ?? path.join(process.cwd(), 'app', 'data')
 const tasksFile = path.join(dataDir, 'tasks.json')
 const desktop = path.join(os.homedir(), 'Desktop')
 const workspaceRoot = process.env.AI_OLD_WORKSPACE_ROOT ?? path.join(desktop, 'AI for the old')
+const inferenceOrigin = origin(process.env.DEEPSEEK_INFERENCE_ORIGIN, 'https://api.deepseek.com')
 const allowedTools = ['list_files', 'read_metadata', 'read_text', 'copy_files', 'create_directory', 'write_text', 'convert_document', 'create_spreadsheet', 'open_result']
-const allowMockModel = process.env.AI_OLD_ALLOW_MOCK === 'true' || process.env.NODE_ENV === 'test'
-
+const allowMockModel = process.env.AI_OLD_ALLOW_MOCK === 'true'
 const now = () => new Date().toISOString()
-const id = (prefix) => `${prefix}_${crypto.randomUUID().slice(0, 8)}`
-const json = (value, status = 200) => ({ status, body: JSON.stringify(value) })
+const id = prefix => `${prefix}_${crypto.randomUUID().slice(0, 8)}`
+const json = (value, status = 200) => ({ status, body: JSON.stringify(value), headers: { 'content-type': 'application/json; charset=utf-8' } })
+const usage = usageStore(dataDir)
+let account
+let desktopMode = false
+function configureDesktop(safeStorage) { desktopMode = true; initializeAccount(safeStorage) }
+function initializeAccount(codec) {
+  if (account) return account
+  account = createAccountService({
+    store: credentialStore(dataDir, codec), dataDir,
+    callbackOrigin: () => `http://127.0.0.1:${httpServer.address()?.port || port}`,
+    platformOrigin: process.env.DEEPSEEK_PLATFORM_ORIGIN,
+    inferenceOrigin, apiKey: process.env.DEEPSEEK_API_KEY,
+  })
+  return account
+}
+async function accountStatus(refresh = false) {
+  return { ...await initializeAccount().status(refresh), usage: await usage.read() }
+}
 
 async function readTasks() {
   try { return JSON.parse(await fs.readFile(tasksFile, 'utf8')) }
@@ -123,10 +145,11 @@ function validateResult(value) {
 
 async function generateCandidates(prompt, locale = 'zh') {
   const fallback = fallbackCandidates(prompt)
-  const raw = await callDeepSeek([
+  const response = await callDeepSeek([
     { role: 'system', content: `你是面向中老年用户的任务澄清助手。根据用户的一句话，提出最多三个互不重复、容易理解的候选意图。只返回 JSON，不要解释，不要输出命令。每个候选必须有 title、description、needs 字段。title 和 description 使用 ${locale === 'en' ? 'English' : '简体中文'}。` },
     { role: 'user', content: JSON.stringify({ prompt, output_schema: { candidates: [{ title: 'string', description: 'string', needs: 'string' }] } }) },
   ])
+  const raw = response?.content ?? null
   if (raw === null) {
     if (allowMockModel) return fallback
     throw new Error('未配置 DEEPSEEK_API_KEY，无法生成实时候选意图')
@@ -136,10 +159,11 @@ async function generateCandidates(prompt, locale = 'zh') {
 
 async function generatePlan(task, content, locale = 'zh') {
   const fallback = { nextAction: 'ready_to_run', question: '', target: content, output: '任务 workspace/output/任务说明.md', network: '需要联网调用 DeepSeek 生成结果说明', summary: content }
-  const raw = await callDeepSeek([
+  const response = await callDeepSeek([
     { role: 'system', content: `你是任务澄清与执行预览助手。一次只提出一个问题；当目标、范围和产物足够明确时返回 ready_to_run，否则返回 ask_question。只返回 JSON，不要思维过程，不要 shell 命令。输出 ${locale === 'en' ? 'English' : '简体中文'}。` },
     { role: 'user', content: JSON.stringify({ original_prompt: task.prompt, previous_turns: task.turns, latest_answer: content, output_schema: { next_action: 'ready_to_run | ask_question', question: 'string', target: 'string', output: 'string', network: 'string', summary: 'string' } }) },
   ])
+  const raw = response?.content ?? null
   if (raw === null) {
     if (allowMockModel) return fallback
     throw new Error('未配置 DEEPSEEK_API_KEY，无法生成实时澄清结果')
@@ -150,10 +174,11 @@ async function generatePlan(task, content, locale = 'zh') {
 async function generateResult(task, files, locale = 'zh') {
   const fallback = { summary: `已完成“${task.title}”，原始文件未修改。`, suggestions: ['请打开 output 文件夹检查主要产物。', '如有遗漏，可以在本任务中提交反馈。'], feedbackOptions: ['文件找错了', '内容不准确', '格式或排版不合适', '漏掉了一些内容', '我想换一种做法', '其他问题'], markdown: '' }
   const metadata = files.slice(0, 80).map(file => ({ name: file.name, extension: file.extension, size: file.size, modifiedAt: file.modifiedAt }))
-  const raw = await callDeepSeek([
+  const response = await callDeepSeek([
     { role: 'system', content: `你是本地任务结果审阅助手。根据任务和文件元数据，生成给中老年用户看的简短结果说明、最多五条下一步建议、二到七条反馈选项，以及一段 Markdown 报告正文。不要虚构已执行的操作，不要输出思维过程或命令。只返回 JSON，语言为 ${locale === 'en' ? 'English' : '简体中文'}。` },
     { role: 'user', content: JSON.stringify({ task: { title: task.title, prompt: task.prompt, confirmed_turns: task.turns }, files: metadata, output_schema: { summary: 'string', suggestions: ['string'], feedback_options: ['string'], markdown: 'string' } }) },
   ])
+  const raw = response?.content ?? null
   if (raw === null) {
     if (allowMockModel) return fallback
     throw new Error('未配置 DEEPSEEK_API_KEY，无法生成实时结果建议')
@@ -162,10 +187,11 @@ async function generateResult(task, files, locale = 'zh') {
 }
 
 async function generateRevision(task, category, comment, locale = 'zh') {
-  const raw = await callDeepSeek([
+  const response = await callDeepSeek([
     { role: 'system', content: `你是任务修改助手。根据用户对结果的反馈，生成下一轮唯一需要确认的问题。只返回 JSON，不要思维过程，语言为 ${locale === 'en' ? 'English' : '简体中文'}。` },
     { role: 'user', content: JSON.stringify({ task: task.title, feedback: category, comment, output_schema: { question: 'string' } }) },
   ])
+  const raw = response?.content ?? null
   if (raw === null) {
     if (allowMockModel) return { question: `你希望我如何处理“${category}”？` }
     throw new Error('未配置 DEEPSEEK_API_KEY，无法生成实时修改问题')
@@ -209,17 +235,32 @@ async function runTask(task, scope = {}, locale = 'zh') {
 }
 
 async function callDeepSeek(messages) {
-  const key = process.env.DEEPSEEK_API_KEY
-  if (!key) return null
-  const response = await fetch('https://api.deepseek.com/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` }, body: JSON.stringify({ model: 'deepseek-chat', messages, temperature: 0.2, response_format: { type: 'json_object' } }) })
-  if (!response.ok) throw new Error(`DeepSeek request failed (${response.status})`)
-  const body = await response.json()
-  return body.choices?.[0]?.message?.content ?? null
+  const credential = await initializeAccount().credential()
+  if (credential.mode === 'none') {
+    if (allowMockModel) return null
+    throw new Error('DeepSeek 未连接，请登录账号或在账户页面连接 API key / Connect your account or API key')
+  }
+  const isAccount = credential.mode === 'account'
+  const headers = { 'content-type': 'application/json', ...(isAccount ? { 'x-dsh-auth-token': credential.token, 'anthropic-version': '2023-06-01' } : { authorization: `Bearer ${credential.token}` }) }
+  const model = process.env.DEEPSEEK_MODEL ?? 'deepseek-chat'
+  const payload = isAccount
+    ? { model, max_tokens: 4096, stream: false, thinking: { type: 'disabled' }, temperature: 0.2,
+        system: messages.filter(m => m.role === 'system').map(m => m.content).join('\n\n'),
+        messages: messages.filter(m => m.role !== 'system').map(m => ({ role: m.role, content: m.content })) }
+    : { model, max_tokens: 4096, messages, temperature: 0.2, response_format: { type: 'json_object' } }
+  const body = await requestJson(`${inferenceOrigin}${isAccount ? '/anthropic/v1/messages' : '/chat/completions'}`, { method: 'POST', headers, body: JSON.stringify(payload) }, 2 * 1024 * 1024)
+  const content = isAccount ? body.content?.filter(item => item.type === 'text').map(item => item.text).join('') : body.choices?.[0]?.message?.content
+  const exact = body.usage && Number.isSafeInteger(body.usage.prompt_tokens ?? body.usage.input_tokens) && Number.isSafeInteger(body.usage.completion_tokens ?? body.usage.output_tokens)
+  const measured = exact ? body.usage : { input_tokens: messages.reduce((total, message) => total + Math.ceil(JSON.stringify(message).length / 4) + 4, 0), output_tokens: Math.ceil(String(content ?? '').length / 4) }
+  await usage.record(measured, !exact, isAccount)
+  if (typeof content !== 'string' || !content.trim()) throw new Error('DeepSeek returned no usable answer; retry the request')
+  return { content, usage: measured, authMode: credential.mode }
 }
 
 async function parseBody(req) {
   const chunks = []
-  for await (const chunk of req) chunks.push(chunk)
+  let size = 0
+  for await (const chunk of req) { size += chunk.length; if (size > 1_048_576) throw new Error('Request is too large'); chunks.push(chunk) }
   if (!chunks.length) return {}
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { throw new Error('请求格式不正确') }
 }
@@ -227,8 +268,13 @@ async function parseBody(req) {
 async function route(req, url) {
   const body = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await parseBody(req) : {}
   const tasks = await readTasks()
-  if (req.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'ai-for-the-old-local', version: '0.1.2', deepseekConfigured: Boolean(process.env.DEEPSEEK_API_KEY) })
-  if (req.method === 'GET' && url.pathname === '/api/account/status') return json({ provider: 'DeepSeek', apiConfigured: Boolean(process.env.DEEPSEEK_API_KEY), webLoginTransfer: false, balance: null, billing: 'official_platform_only' })
+  if (req.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'ai-for-the-old-local', version: '0.1.3', deepseekConfigured: Boolean(process.env.DEEPSEEK_API_KEY) })
+  if (req.method === 'GET' && url.pathname === '/api/account/status') return json(await accountStatus(url.searchParams.get('refresh') === '1'))
+  if (req.method === 'POST' && url.pathname === '/api/account/login/start') return json(await initializeAccount().start(body.locale === 'en' ? 'en' : 'zh'))
+  if (req.method === 'POST' && url.pathname === '/api/account/login/cancel') { await initializeAccount().cancel(); return json(await accountStatus()) }
+  if (req.method === 'POST' && url.pathname === '/api/account/logout') { await initializeAccount().logout(); return json(await accountStatus()) }
+  if (req.method === 'POST' && url.pathname === '/api/account/key') { await initializeAccount().setApiKey(body.key); return json(await accountStatus()) }
+  if (req.method === 'POST' && url.pathname === '/api/account/key/remove') { await initializeAccount().removeApiKey(); return json(await accountStatus()) }
   if (req.method === 'GET' && url.pathname === '/api/tasks') return json(tasks.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(task => ({ ...task, candidateOptions: task.candidateOptions ?? [] })))
   if (req.method === 'POST' && url.pathname === '/api/tasks') {
     if (typeof body.prompt !== 'string' || !body.prompt.trim()) return json({ code: 'prompt_required', message: '请先告诉我想完成什么事' }, 400)
@@ -281,22 +327,55 @@ async function route(req, url) {
   return json({ code: 'method_not_allowed', message: '不支持这个操作' }, 405)
 }
 
+async function dispatch(method, pathname, body = '') {
+  if (!['GET', 'POST'].includes(method) || typeof pathname !== 'string' || !/^\/api\/[a-zA-Z0-9_/?=&-]+$/.test(pathname) || typeof body !== 'string' || Buffer.byteLength(body) > 1_048_576) return json({ message: 'Invalid local request' }, 400)
+  const request = Readable.from(body ? [Buffer.from(body)] : [])
+  request.method = method
+  try { return await route(request, new URL(pathname, 'http://127.0.0.1')) }
+  catch (error) { return json({ code: 'request_failed', message: error instanceof Error ? error.message : 'Local request failed' }, 503) }
+}
+
 const httpServer = createServer(async (req, res) => {
-  const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`)
+  res.setHeader('cache-control', 'no-store')
   try {
+    const bound = httpServer.address()?.port
+    if (![`127.0.0.1:${bound}`, `localhost:${bound}`].includes(req.headers.host)) { res.writeHead(403).end(); return }
+    const url = new URL(req.url ?? '/', `http://127.0.0.1:${bound}`)
+    if (req.method === 'GET' && url.pathname === '/oauth/callback') {
+      const result = await initializeAccount().callback(url)
+      res.writeHead(result.status, { ...(result.location ? { location: result.location } : {}), 'content-type': 'text/plain; charset=utf-8', 'content-security-policy': "default-src 'none'", 'referrer-policy': 'no-referrer' })
+      res.end(result.status === 302 ? '' : '登录未完成，请返回应用重试。 / Sign-in did not complete. Return to the app and retry.')
+      return
+    }
+    // Packaged UI talks through authenticated Electron IPC, never a public loopback API.
+    if (desktopMode) { res.writeHead(403).end(); return }
+    const origin = req.headers.origin
+    if (origin && !['http://127.0.0.1:4178', 'http://localhost:4178', `http://127.0.0.1:${bound}`].includes(origin)) { res.writeHead(403).end(); return }
+    if (origin) { res.setHeader('access-control-allow-origin', origin); res.setHeader('vary', 'Origin') }
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, { 'access-control-allow-methods': 'GET,POST,OPTIONS', 'access-control-allow-headers': 'content-type' }).end()
+      return
+    }
+    if (req.method === 'POST' && !String(req.headers['content-type'] ?? '').startsWith('application/json')) { res.writeHead(415).end(); return }
     const result = await route(req, url)
-    res.writeHead(result.status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type' })
-    res.end(result.body)
+    res.writeHead(result.status, result.headers).end(result.body)
   } catch (error) {
-    const message = error instanceof Error ? error.message : '本地服务发生错误'
-    const providerFailure = message.includes('DeepSeek') || message.includes('DEEPSEEK_API_KEY')
-    res.writeHead(providerFailure ? 503 : 500, { 'content-type': 'application/json; charset=utf-8' })
-    res.end(JSON.stringify({ code: providerFailure ? 'deepseek_unavailable' : 'internal_error', message }))
+    res.writeHead(503, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ code: 'request_failed', message: error instanceof Error ? error.message : 'Local service failed' }))
   }
 })
 
-if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
-  httpServer.listen(port, '127.0.0.1', () => console.log(`AI for the old local API listening on http://127.0.0.1:${port}`))
+async function startServer(listenPort = port) {
+  if (httpServer.listening) return httpServer
+  await new Promise((resolve, reject) => {
+    const fail = error => { httpServer.off('listening', listening); reject(error) }
+    const listening = () => { httpServer.off('error', fail); resolve() }
+    httpServer.once('error', fail).once('listening', listening).listen(listenPort, '127.0.0.1')
+  })
+  return httpServer
 }
+if (process.env.AI_OLD_DESKTOP !== '1' && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+  startServer().then(() => console.log(`AI for the old local API listening on http://127.0.0.1:${httpServer.address().port}`)).catch(() => { console.error('Local API could not start: check the configured port'); process.exitCode = 1 })
+}
+function dispose() { account?.dispose(); httpServer.close() }
 
-export { allowedTools, fallbackCandidates, createTask, generateCandidates, generatePlan, generateResult, listFiles, slug, httpServer }
+export { allowedTools, fallbackCandidates, createTask, generateCandidates, generatePlan, generateResult, listFiles, slug, httpServer, startServer, configureDesktop, dispatch, dispose }

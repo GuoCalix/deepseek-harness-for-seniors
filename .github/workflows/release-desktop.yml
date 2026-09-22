@@ -6,42 +6,83 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing or new release tag to receive the installers
+        description: Existing tag to build and publish
         required: true
-        default: v0.1.0
+        default: v0.1.3
 
 permissions:
   contents: write
 
 jobs:
   macos:
-    runs-on: macos-latest
-    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+            directory: mac-arm64
+          - runner: macos-15-intel
+            arch: x64
+            directory: mac
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      CSC_LINK: ${{ secrets.CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      AI_OLD_REQUIRE_NOTARIZATION: ${{ vars.AI_OLD_REQUIRE_NOTARIZATION }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run desktop:mac -- --x64 --publish never
+      - run: npm run check && npm test
+      - run: npm run desktop:mac -- --${{ matrix.arch }}
+      - name: Launch the packaged app and exercise renderer IPC
+        run: npm run test:desktop
+        env:
+          AI_OLD_TEST_EXECUTABLE: ${{ github.workspace }}/release/${{ matrix.directory }}/AI for the old.app/Contents/MacOS/AI for the old
+      - name: Verify architecture and code signature
+        run: |
+          lipo -archs 'release/${{ matrix.directory }}/AI for the old.app/Contents/MacOS/AI for the old'
+          codesign --verify --deep --strict 'release/${{ matrix.directory }}/AI for the old.app'
+      - name: Verify notarization when configured
+        if: env.APPLE_ID != ''
+        run: |
+          xcrun stapler validate 'release/${{ matrix.directory }}/AI for the old.app'
+          spctl --assess --type execute --verbose 'release/${{ matrix.directory }}/AI for the old.app'
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-installer
+          name: macos-${{ matrix.arch }}-installer
           path: release/*.dmg
           if-no-files-found: error
 
   windows:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run desktop:win -- --x64 --publish never
+      - run: npm run check
+      - run: npm test
+      - run: npm run desktop:win -- --x64
+      - name: Launch the packaged Windows app
+        run: npm run test:desktop
+        env:
+          AI_OLD_TEST_EXECUTABLE: ${{ github.workspace }}/release/win-unpacked/AI for the old.exe
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installer
@@ -55,10 +96,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
-      - name: Publish installers to GitHub release
+          merge-multiple: true
+      - name: Record checksums
+        working-directory: release-assets
+        run: sha256sum *.dmg *.exe > SHA256SUMS.txt
+      - name: Publish verified installers
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          files: release-assets/**/*
+          files: release-assets/*
           fail_on_unmatched_files: true
           generate_release_notes: true
