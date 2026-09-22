@@ -16,7 +16,7 @@ The current desktop implementation uses Electron 44, React and a Node service. T
 | `app/server/index.mjs` | Task contracts, metadata indexing, Markdown reports, local transport |
 | `app/src/account.tsx` | Account state, login, balance, top-up and API-key UI |
 
-The packaged renderer loads relative assets through `file://` and uses a narrow preload bridge. Main checks both the requesting WebContents and its main frame against the packaged page. No Node APIs or credentials are exposed to the renderer. The HTTP listener uses an ephemeral loopback port only for the authorization callback; packaged HTTP API requests are refused. This removes the old file-origin CORS failure and port 4179 collision.
+The packaged renderer loads relative assets through `file://` and uses a narrow preload bridge. Main checks both the requesting WebContents and its main frame against the packaged page. No Node APIs or stored credentials are exposed to the renderer. The HTTP listener uses an ephemeral loopback port only for the authorization callback; packaged HTTP API requests are refused. This removes the old file-origin CORS failure and port 4179 collision. Secure storage uses Electron's asynchronous encryptor so a locked Keychain or access prompt does not block the application main thread.
 
 Development runs Vite at `127.0.0.1:4178` and the API at `127.0.0.1:4179`. The API rejects foreign origins, unexpected Host headers and non-JSON POST requests. The Vite proxy forwards same-origin `/api` requests. Never expose these development services on a public interface.
 
@@ -126,7 +126,7 @@ Desktop tests launch Electron and verify the actual renderer, relative file asse
 AI_OLD_TEST_EXECUTABLE='/absolute/path/AI for the old.app/Contents/MacOS/AI for the old' npm run test:desktop
 ```
 
-On Windows, set the same variable to `release/win-unpacked/AI for the old.exe`. The test uses an isolated user-data directory and closes its own application. `AI_OLD_SCREENSHOT_DIR` optionally captures the login dialog; do not enable screenshots containing credentials or personal account information.
+On Windows, set the same variable to `release/win-unpacked/AI for the old.exe`. The test uses an isolated user-data directory and closes its own application. `AI_OLD_SCREENSHOT_DIR` optionally captures the login dialog; do not enable screenshots containing credentials or personal account information. A local locked Keychain can be bypassed for renderer-only testing with `AI_OLD_SKIP_KEYCHAIN_TEST=true`; the output explicitly reports that encryption was skipped. Release CI must not set that flag. Ad-hoc builds can request fresh Keychain approval after an update or relocation; only the user can approve the OS prompt. Do not alter Keychain access controls to suppress it.
 
 For an explicitly authorized live API-key test, run `node scripts/live-verify.mjs` and provide a low-budget key on stdin with terminal echo disabled. Never embed the key in shell command arguments, source, environment files or recorded CI logs. The script verifies official balance, candidates, clarification, result and feedback with four or more live calls, then removes its temporary data. Restore terminal echo afterward. Rotate keys previously exposed in chat/transcripts.
 

@@ -20,13 +20,13 @@ try {
   const loaded = await page.evaluate(() => ({ scripts: [...document.scripts].filter(s => s.src).every(s => s.src.startsWith('file:')), bridge: typeof window.desktop?.request === 'function' }))
   assert.equal(loaded.scripts, true)
   assert.equal(loaded.bridge, true)
-  const encryption = await application.evaluate(({ safeStorage }) => {
-    if (!safeStorage.isEncryptionAvailable()) return { available: false }
+  const encryption = process.env.AI_OLD_SKIP_KEYCHAIN_TEST === 'true' ? null : await Promise.race([application.evaluate(async ({ safeStorage }) => {
+    if (!await safeStorage.isAsyncEncryptionAvailable()) return { available: false }
     const value = 'non-secret-storage-test'
-    const encrypted = safeStorage.encryptString(value)
-    return { available: true, roundTrip: safeStorage.decryptString(encrypted) === value, hidden: !encrypted.includes(Buffer.from(value)) }
-  })
-  assert.deepEqual(encryption, { available: true, roundTrip: true, hidden: true })
+    const encrypted = await safeStorage.encryptStringAsync(value)
+    return { available: true, roundTrip: (await safeStorage.decryptStringAsync(encrypted)).result === value, hidden: !encrypted.includes(Buffer.from(value)) }
+  }), new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('System keychain is waiting for user unlock/approval')), 15_000); timer.unref() })])
+  if (encryption) assert.deepEqual(encryption, { available: true, roundTrip: true, hidden: true })
   await page.getByPlaceholder('你想让电脑帮你做什么？').fill('帮我整理桌面的照片')
   await page.getByRole('button', { name: '开始整理' }).click()
   await page.getByRole('button', { name: /按日期整理照片/ }).waitFor()
@@ -42,7 +42,7 @@ try {
   assert.deepEqual(errors, [])
   const root = process.env.AI_OLD_SCREENSHOT_DIR
   if (root) { await mkdir(root, { recursive: true }); await page.screenshot({ path: path.join(root, 'desktop-login.png') }) }
-  console.log(JSON.stringify({ packaged: Boolean(executablePath), rendered: true, ipcPost: true, secureStorage: true, candidates: count, clarification: true, login: true, rendererErrors: errors.length }))
+  console.log(JSON.stringify({ packaged: Boolean(executablePath), rendered: true, ipcPost: true, secureStorage: encryption ? 'passed' : 'skipped-explicitly', candidates: count, clarification: true, login: true, rendererErrors: errors.length }))
 } finally {
   await application.close()
   await rm(directory, { recursive: true, force: true })

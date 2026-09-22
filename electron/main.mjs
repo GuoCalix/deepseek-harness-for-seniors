@@ -39,7 +39,11 @@ else {
     process.env.AI_OLD_WORKSPACE_ROOT ??= path.join(app.getPath('desktop'), 'AI for the old')
     process.env.AI_OLD_DESKTOP = '1'
     runtime = await import('../app/server/index.mjs')
-    runtime.configureDesktop(safeStorage)
+    runtime.configureDesktop({
+      isEncryptionAvailable: () => safeStorage.isAsyncEncryptionAvailable(),
+      encryptString: value => safeStorage.encryptStringAsync(value),
+      decryptString: async value => (await safeStorage.decryptStringAsync(value)).result,
+    })
     await runtime.startServer(0)
     ipcMain.handle('local-api', (event, method, pathname, body) => { trusted(event); return runtime.dispatch(method, pathname, body) })
     ipcMain.handle('open-deepseek', (event, url) => { trusted(event); return shell.openExternal(platformUrl(url)) })

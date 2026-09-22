@@ -26,15 +26,16 @@ export function credentialStore(directory, codec) {
     async read() {
       if (memory !== undefined) return memory
       const encoded = await readJson(file)
-      if (encoded && (!codec || !codec.isEncryptionAvailable())) throw new Error('Secure credential storage is unavailable')
-      memory = encoded ? JSON.parse(codec.decryptString(Buffer.from(encoded.encrypted, 'base64'))) : {}
+      if (encoded && (!codec || !await codec.isEncryptionAvailable())) throw new Error('Secure credential storage is unavailable')
+      memory = encoded ? JSON.parse(await codec.decryptString(Buffer.from(encoded.encrypted, 'base64'))) : {}
       return memory
     },
     write(value) {
       const operation = queue.then(async () => {
         if (codec) {
-          if (!codec.isEncryptionAvailable()) throw new Error('Secure credential storage is unavailable')
-          await writeJson(file, { version: 1, encrypted: codec.encryptString(JSON.stringify(value)).toString('base64') })
+          if (!await codec.isEncryptionAvailable()) throw new Error('Secure credential storage is unavailable')
+          const encrypted = await codec.encryptString(JSON.stringify(value))
+          await writeJson(file, { version: 1, encrypted: encrypted.toString('base64') })
         }
         memory = value
       })

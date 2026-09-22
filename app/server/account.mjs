@@ -37,6 +37,9 @@ export function createAccountService({ store, dataDir, callbackOrigin, platformO
       await store.write(record)
     }
   })()
+  // Loading can fail before the renderer makes its first request. Preserve the
+  // rejection for callers without letting Node terminate the desktop process.
+  void ready.catch(() => undefined)
   function enqueue(operation) {
     const next = operations.then(operation)
     operations = next.catch(() => undefined)

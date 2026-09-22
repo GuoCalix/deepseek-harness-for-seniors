@@ -13,7 +13,14 @@ export function useAccount() {
   }
   useEffect(() => {
     let active = true
-    const loadState = () => api.accountStatus().then(value => { if (active) setStatus(value) }).catch(() => undefined)
+    let pending = false
+    const loadState = async () => {
+      if (pending) return
+      pending = true
+      try { const value = await api.accountStatus(); if (active) { setStatus(value); setError('') } }
+      catch (e) { if (active) setError(e instanceof Error ? e.message : 'Account unavailable') }
+      finally { pending = false }
+    }
     loadState()
     const timer = setInterval(loadState, 2000)
     const refresh = () => { void load(true) }
@@ -57,7 +64,7 @@ export function AccountPanel({ locale, onLogin }: { locale: Locale; onLogin: () 
 
 export function LoginContent({ locale, onDone }: { locale: Locale; onDone: () => void }) {
   const zh = locale === 'zh'
-  const { status, load } = useAccount()
+  const { status, load, error: statusError } = useAccount()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [key, setKey] = useState('')
@@ -67,7 +74,8 @@ export function LoginContent({ locale, onDone }: { locale: Locale; onDone: () =>
   const signedIn = status?.authMode === 'account'
   async function action(fn: () => Promise<unknown>) { setBusy(true); setError(''); try { await fn(); await load(); changed() } catch (e) { setError(e instanceof Error ? e.message : 'Connection failed') } finally { setBusy(false) } }
   return <div className="login-modal"><LockKeyhole size={36} /><h3>{signedIn ? (zh ? '账号已授权' : 'Account authorized') : (zh ? '连接你的 DeepSeek' : 'Connect your DeepSeek')}</h3><p>{zh ? '在电脑的官方授权页使用微信扫码或手机号登录。确认后，本应用会自动接入账号。' : 'Use WeChat QR or phone sign-in on the official page on this computer. Authorization connects your account automatically.'}</p>
-    {error && <p className="account-error" role="alert">{error}</p>}
+    {(error || statusError) && <p className="account-error" role="alert">{error || statusError}</p>}
+    {!status && <p role="status">{zh ? '正在读取系统安全存储。如 macOS 提示，请解锁钥匙串并授权。' : 'Reading system secure storage. Unlock and approve Keychain if macOS asks.'}</p>}
     {!signedIn && !active && <button className="primary-button full-button" disabled={busy} onClick={() => action(async () => { const result = await api.startAccountLogin(locale); if (result.authorizeUrl && window.desktop) await openDeepSeek(result.authorizeUrl) })}>{busy ? <LoaderCircle className="spin" size={18} /> : <ExternalLink size={18} />}{zh ? '打开官方账号授权' : 'Authorize with DeepSeek'}</button>}
     {current?.authorizeUrl && <a className="secondary-button full-button" href={current.authorizeUrl} target="_blank" rel="noreferrer" onClick={e => { if (window.desktop) { e.preventDefault(); void openDeepSeek(current.authorizeUrl!) } }}>{zh ? '继续打开授权页' : 'Continue to authorization'}</a>}
     {active && <><p role="status">{zh ? '等待你在官方页面完成确认…' : 'Waiting for confirmation on the official page…'}</p><button className="secondary-button full-button" disabled={busy} onClick={() => action(api.cancelAccountLogin)}>{zh ? '取消此次登录' : 'Cancel sign-in'}</button></>}
