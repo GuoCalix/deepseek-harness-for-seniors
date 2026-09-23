@@ -29,7 +29,7 @@ Use Node 22.22.2 or later. CI uses the maintained Node 22 release. Direct depend
 ```bash
 git clone --recurse-submodules https://github.com/GuoCalix/deepseek-harness-for-seniors.git
 cd deepseek-harness-for-seniors
-git checkout v0.1.5
+git checkout v0.1.6
 git submodule update --init --recursive
 npm ci
 npm run check
