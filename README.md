@@ -40,6 +40,7 @@ npm run check
 npm test
 npm run build
 npm run test:desktop
+npm run test:desktop:closed-loop
 npm run desktop:mac -- --arm64
 npm run desktop:mac -- --x64
 npm run desktop:win -- --x64
@@ -49,11 +50,11 @@ npm run desktop:win -- --x64
 
 ### 本次验证与边界
 
-v0.1.6 在 v0.1.4 的基础上修复了澄清闭环：DeepSeek 继续追问时清除旧候选并显示回答框，直到生成执行预览。v0.1.4 的 Apple Silicon、Intel Mac 和 Windows 实际打包应用均通过 [CI 验证](https://github.com/GuoCalix/deepseek-harness-for-seniors/actions/runs/35762172897)：页面、任务创建、澄清和系统加密存储通过，渲染错误为 0。本机最终 arm64 包通过页面和 IPC 检查；因锁屏等待 Keychain 授权，本机此轮明确跳过加密检查。四次真实 API key 调用验证候选、澄清、结果和反馈，共 1,485 tokens；官方余额查询成功。
+v0.1.7 在 v0.1.6 的澄清闭环基础上接入真实的本地结构化工具执行：`list_files`、`read_metadata`、`read_text`、`copy_files`、`move_to_trash`、`create_directory`、`write_text`、`convert_document`（Markdown/TXT → HTML）、`create_spreadsheet`（CSV）和 `open_result`。确认执行时目录和联网授权一次性保存；执行页支持暂停、继续和停止，失败会保留可重试任务和追加日志。删除只进入系统回收站，原文件可以恢复。隔离 Electron 闭环测试已实际验证“删除桌面上的安装包”移动到临时回收站，渲染错误为 0。
 
 官方 PKCE 初始化及微信扫码页已验证。手机扫码后的真实账号 grant、账号钱包及最终支付到账尚需用户交互验收；自动化协议测试使用明确标记的测试数据，不能替代这些真实账号验收。
 
-本次版本修复现有 Electron 项目的账号与分发问题。设计文档要求的 Tauri/Rust、完整本地文件工具、Word/PDF/表格生成、暂停恢复及 SQLite 等仍有未完成项；当前执行器主要索引元数据并生成 Markdown 报告，不能宣称已完成整份设计验收。要求保留在原设计文档中，未被降级或删除。
+本次版本修复现有 Electron 项目的账号、分发和基本本地执行问题。设计文档要求的 Tauri/Rust 迁移、SQLite 事件存储、完整 Word/PDF 转换、跨平台原生权限和生产级恢复仍需后续迭代；当前实现明确只承诺上述受限工具和 CSV/HTML 基础格式，不能宣称已完成整份设计验收。要求保留在原设计文档中，未被降级或删除。
 
 英文复现、恢复和维护说明见 [docs/OPERATIONS.md](docs/OPERATIONS.md)。上游协议与 token-meter 思路来自固定提交的 [DeepSeek Harness](deepseek-harness/)；这是适配实现，不是直接加载完整插件。许可见 [LICENSE](LICENSE) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
@@ -95,6 +96,7 @@ npm run check
 npm test
 npm run build
 npm run test:desktop
+npm run test:desktop:closed-loop
 npm run desktop:mac -- --arm64
 npm run desktop:mac -- --x64
 npm run desktop:win -- --x64
@@ -104,10 +106,10 @@ Dependency downloads may use `HTTPS_PROXY=http://127.0.0.1:6268` and `HTTP_PROXY
 
 ### Verification and remaining acceptance work
 
-v0.1.6 adds the complete clarification-loop fix on top of v0.1.4: when DeepSeek asks a follow-up question, stale candidate cards are cleared and an answer field is shown until an execution preview is ready. The v0.1.4 Apple Silicon, Intel Mac and Windows packaged apps passed [CI validation](https://github.com/GuoCalix/deepseek-harness-for-seniors/actions/runs/35762172897): rendering, task creation, clarification and system encryption, with zero renderer errors. The final local arm64 package passed rendering and IPC; that local run explicitly skipped encryption because the locked Mac required Keychain approval. Four live API-key requests validated candidates, clarification, results and feedback, totaling 1,485 tokens. Official balance queries succeeded.
+v0.1.7 adds the real local structured-tool executor on top of the v0.1.6 clarification loop: `list_files`, `read_metadata`, `read_text`, `copy_files`, `move_to_trash`, `create_directory`, `write_text`, Markdown/TXT-to-HTML conversion, CSV spreadsheet creation and restricted result opening. Directory and network consent are stored once per task; pause, resume, cancel and retry states are persisted with append-only execution logs. Deletion uses the recoverable system Trash. An isolated Electron closed-loop test actually moved a desktop installer fixture into a temporary Trash and reported zero renderer errors.
 
 Live PKCE initialization and the official WeChat QR page were verified. Real account-grant inference, account-wallet retrieval and settled payment still require user interaction for acceptance. Protocol fixture tests do not stand in for those checks.
 
-This release repairs the existing Electron application's account and distribution flows. The design document's Tauri/Rust architecture, full file tools, Word/PDF/spreadsheet generation, pause/recovery and SQLite persistence remain incomplete. The current executor primarily indexes metadata and creates Markdown reports; this release is not full acceptance of the entire design. The original requirements remain intact.
+This release repairs the existing Electron application's account, distribution and basic local execution flows. The design document's Tauri/Rust migration, SQLite event store, complete Word/PDF conversion, cross-platform native permission integration and production-grade recovery remain future work. The implementation explicitly supports the restricted tools and CSV/HTML formats listed above; this release is not full acceptance of the entire design. The original requirements remain intact.
 
 See [docs/OPERATIONS.md](docs/OPERATIONS.md) for reproducible setup, recovery and maintenance. Protocol and token-meter approaches are adapted from the pinned [DeepSeek Harness](deepseek-harness/) source, not imported as the complete plugin runtime. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

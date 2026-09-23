@@ -16,6 +16,14 @@ function platformUrl(value) {
   if (url.origin !== 'https://platform.deepseek.com' || url.username || url.password || !['/dsh/authorize', '/usage', '/top_up', '/api_keys'].includes(url.pathname)) throw new Error('Invalid DeepSeek page')
   return url.href
 }
+function localPath(value) {
+  if (typeof value !== 'string' || !value) throw new Error('Invalid local path')
+  const root = path.resolve(process.env.AI_OLD_WORKSPACE_ROOT ?? path.join(app.getPath('desktop'), 'AI for the old'))
+  const target = path.resolve(value)
+  const relative = path.relative(root, target)
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('Only task workspace paths can be opened')
+  return target
+}
 function reportStartupFailure() {
   dialog.showErrorBox('AI for the old 无法启动 / Unable to start', '本地界面加载失败。请重新启动应用；如果仍然失败，请重新安装与你的电脑匹配的版本。\nThe local interface failed to load. Restart or reinstall the matching installer.')
 }
@@ -47,6 +55,7 @@ else {
     await runtime.startServer(0)
     ipcMain.handle('local-api', (event, method, pathname, body) => { trusted(event); return runtime.dispatch(method, pathname, body) })
     ipcMain.handle('open-deepseek', (event, url) => { trusted(event); return shell.openExternal(platformUrl(url)) })
+    ipcMain.handle('open-local-path', (event, value) => { trusted(event); return shell.openPath(localPath(value)).then(error => { if (error) throw new Error(error) }) })
     await createWindow()
   }).catch(() => { reportStartupFailure(); app.quit() })
 }

@@ -8,14 +8,17 @@ import { createAccountService } from './account.mjs'
 import { credentialStore } from './storage.mjs'
 import { usageStore } from './usage.mjs'
 import { origin, requestJson } from './network.mjs'
+import { createToolExecutor, validateToolPlan } from './tools.mjs'
 
 const port = Number(process.env.AI_OLD_API_PORT ?? 4179)
 const dataDir = process.env.AI_OLD_DATA_DIR ?? path.join(process.cwd(), 'app', 'data')
 const tasksFile = path.join(dataDir, 'tasks.json')
-const desktop = path.join(os.homedir(), 'Desktop')
+const desktop = process.env.AI_OLD_DESKTOP_PATH ?? path.join(os.homedir(), 'Desktop')
+const downloads = process.env.AI_OLD_DOWNLOADS_PATH ?? path.join(os.homedir(), 'Downloads')
 const workspaceRoot = process.env.AI_OLD_WORKSPACE_ROOT ?? path.join(desktop, 'AI for the old')
+const trashRoot = process.env.AI_OLD_TRASH_ROOT
 const inferenceOrigin = origin(process.env.DEEPSEEK_INFERENCE_ORIGIN, 'https://api.deepseek.com')
-const allowedTools = ['list_files', 'read_metadata', 'read_text', 'copy_files', 'create_directory', 'write_text', 'convert_document', 'create_spreadsheet', 'open_result']
+const allowedTools = ['list_files', 'read_metadata', 'read_text', 'copy_files', 'move_to_trash', 'create_directory', 'write_text', 'convert_document', 'create_spreadsheet', 'open_result']
 const allowMockModel = process.env.AI_OLD_ALLOW_MOCK === 'true'
 const now = () => new Date().toISOString()
 const id = prefix => `${prefix}_${crypto.randomUUID().slice(0, 8)}`
@@ -23,6 +26,10 @@ const json = (value, status = 200) => ({ status, body: JSON.stringify(value), he
 const usage = usageStore(dataDir)
 let account
 let desktopMode = false
+const taskControls = new Map()
+class TaskControlError extends Error {
+  constructor(status) { super(status === 'CANCELLED' ? '任务已停止' : '任务已暂停'); this.name = 'TaskControlError'; this.status = status }
+}
 function configureDesktop(safeStorage) { desktopMode = true; initializeAccount(safeStorage) }
 function initializeAccount(codec) {
   if (account) return account
@@ -57,6 +64,14 @@ function slug(value) {
 function titleFor(prompt) {
   const trimmed = prompt.trim().replace(/[。.!！?？]+$/u, '')
   return trimmed.length > 26 ? `${trimmed.slice(0, 26)}…` : trimmed || '未命名任务'
+}
+
+function defaultScopeRoots(prompt) {
+  const text = String(prompt).toLowerCase()
+  const roots = []
+  if (/桌面|desktop/u.test(text)) roots.push(desktop)
+  if (/下载|downloads?/u.test(text)) roots.push(downloads)
+  return roots.length ? roots : [desktop, downloads]
 }
 
 async function createWorkspace(title) {
@@ -96,6 +111,26 @@ function fallbackCandidates(prompt) {
     { id: 'document', title: '生成一份新材料', description: '读取必要的参考内容，生成一份可以继续编辑的材料。', needs: '你允许访问的参考文件' },
     { id: 'inventory', title: '先做一份文件清单', description: '不改动原文件，列出可能相关的文件和所在位置。', needs: '文件名、日期和大小' },
   ]
+}
+
+function fallbackToolPlan(task) {
+  const prompt = `${task.prompt}\n${task.turns.map(turn => turn.content).join('\n')}`
+  if (/删除|移除|卸载/u.test(prompt) && /桌面/u.test(prompt) && /安装包|安装文件|安装程序|installer|setup/iu.test(prompt)) return {
+    summary: '查找桌面上的安装包并移到系统回收站，原文件可以恢复。',
+    actions: [{ tool: 'move_to_trash', source_scope: 'desktop', selectors: { extensions: ['.dmg', '.pkg', '.exe', '.msi', '.deb', '.rpm', '.zip'], name_contains: ['安装', 'install', 'installer', 'setup'] } }],
+  }
+  if (/删除|移除|卸载/u.test(prompt)) return {
+    summary: '查找用户明确范围内的目标文件并移到系统回收站，原文件可以恢复。',
+    actions: [{ tool: 'move_to_trash', source_scope: 'desktop', selectors: { name_contains: ['安装', 'install', 'installer', 'setup'] } }],
+  }
+  if (/照片|图片/u.test(prompt)) return {
+    summary: '索引授权目录中的照片并复制到任务 workspace。',
+    actions: [{ tool: 'copy_files', source_scope: 'desktop', destination: 'input/photos', selectors: { extensions: ['.jpg', '.jpeg', '.png', '.heic'], limit: 200 } }],
+  }
+  return {
+    summary: '索引授权目录中的文件，并把执行说明写入任务 workspace。',
+    actions: [{ tool: 'list_files', source_scope: 'desktop', selectors: { limit: 200 } }],
+  }
 }
 
 function modelJson(content) {
@@ -146,6 +181,10 @@ function validatePlan(value) {
   }
 }
 
+function validateExecutionPlan(value) {
+  return validateToolPlan(value)
+}
+
 function validateResult(value) {
   if (!value || typeof value !== 'object') throw new Error('DeepSeek 结果不是对象')
   const summary = requireString(value.summary, '结果摘要')
@@ -183,12 +222,27 @@ async function generatePlan(task, content, locale = 'zh') {
   return validatePlan(modelJson(raw))
 }
 
-async function generateResult(task, files, locale = 'zh') {
-  const fallback = { summary: `已完成“${task.title}”，原始文件未修改。`, suggestions: ['请打开 output 文件夹检查主要产物。', '如有遗漏，可以在本任务中提交反馈。'], feedbackOptions: ['文件找错了', '内容不准确', '格式或排版不合适', '漏掉了一些内容', '我想换一种做法', '其他问题'], markdown: '' }
+async function generateExecutionPlan(task, scope, locale = 'zh') {
+  const fallback = fallbackToolPlan(task)
+  const response = await callDeepSeek([
+    { role: 'system', content: `你是本地任务执行规划器。把已经确认的任务转换为结构化工具计划。只返回 JSON，不要命令、脚本或思维过程。允许的工具只有 ${allowedTools.join('、')}。source_scope 只能是 desktop、downloads、workspace 或本次授权的绝对目录；destination 必须是 workspace 内相对路径。删除只能使用 move_to_trash，不能永久删除。convert_document 只把授权的文本或 Markdown 转成 HTML；create_spreadsheet 生成 CSV，rows 必须是二维数组或对象数组。最多 20 步；每一步都必须有 tool 和 selectors、destination 或 rows。语言为 ${locale === 'en' ? 'English' : '简体中文'}。` },
+    { role: 'user', content: JSON.stringify({ task: { prompt: task.prompt, turns: task.turns, title: task.title }, authorized_scope: scope, output_schema: { summary: 'string', actions: [{ tool: 'move_to_trash', source_scope: 'desktop', selectors: { extensions: ['.dmg'], name_contains: ['installer'] }, destination: 'input' }] } }) },
+  ])
+  const raw = response?.content ?? null
+  if (raw === null) {
+    if (allowMockModel) return validateExecutionPlan(fallback)
+    throw new Error('未配置 DEEPSEEK_API_KEY，无法生成实时执行计划')
+  }
+  return validateExecutionPlan(modelJson(raw))
+}
+
+async function generateResult(task, files, locale = 'zh', operations = []) {
+  const movedToTrash = operations.some(operation => operation.tool === 'move_to_trash' && operation.count > 0)
+  const fallback = { summary: movedToTrash ? `已完成“${task.title}”，目标文件已移到回收站，可以恢复。` : `已完成“${task.title}”，原始文件未修改。`, suggestions: ['请打开 output 文件夹检查主要产物。', '如有遗漏，可以在本任务中提交反馈。'], feedbackOptions: ['文件找错了', '内容不准确', '格式或排版不合适', '漏掉了一些内容', '我想换一种做法', '其他问题'], markdown: '' }
   const metadata = files.slice(0, 80).map(file => ({ name: file.name, extension: file.extension, size: file.size, modifiedAt: file.modifiedAt }))
   const response = await callDeepSeek([
-    { role: 'system', content: `你是本地任务结果审阅助手。根据任务和文件元数据，生成给中老年用户看的简短结果说明、最多五条下一步建议、二到七条反馈选项，以及一段 Markdown 报告正文。不要虚构已执行的操作，不要输出思维过程或命令。只返回 JSON，语言为 ${locale === 'en' ? 'English' : '简体中文'}。` },
-    { role: 'user', content: JSON.stringify({ task: { title: task.title, prompt: task.prompt, confirmed_turns: task.turns }, files: metadata, output_schema: { summary: 'string', suggestions: ['string'], feedback_options: ['string'], markdown: 'string' } }) },
+    { role: 'system', content: `你是本地任务结果审阅助手。根据任务、已执行工具摘要和文件元数据，生成给中老年用户看的简短结果说明、最多五条下一步建议、二到七条反馈选项，以及一段 Markdown 报告正文。不要虚构已执行的操作，不要输出思维过程或命令。只返回 JSON，语言为 ${locale === 'en' ? 'English' : '简体中文'}。` },
+    { role: 'user', content: JSON.stringify({ task: { title: task.title, prompt: task.prompt, confirmed_turns: task.turns }, operations, files: metadata, output_schema: { summary: 'string', suggestions: ['string'], feedback_options: ['string'], markdown: 'string' } }) },
   ])
   const raw = response?.content ?? null
   if (raw === null) {
@@ -232,17 +286,32 @@ async function listFiles(root, depth = 0, limit = 80, result = []) {
 
 async function runTask(task, scope = {}, locale = 'zh') {
   const workspace = task.workspacePath ?? await createWorkspace(task.title)
-  const searchRoots = Array.isArray(scope.roots) && scope.roots.length ? scope.roots : [desktop, path.join(os.homedir(), 'Downloads')]
-  const files = []
-  for (const root of searchRoots) files.push(...await listFiles(root))
+  const effectiveScope = { roots: Array.isArray(scope.roots) && scope.roots.length ? scope.roots : [desktop, downloads], network: Boolean(scope.network), agreedAt: scope.agreedAt ?? now() }
+  const control = taskControls.get(task.id) ?? { paused: false, cancelled: false }
+  taskControls.set(task.id, control)
+  const checkpoint = async () => {
+    while (control.paused && !control.cancelled) await new Promise(resolve => setTimeout(resolve, 100))
+    if (control.cancelled) throw new TaskControlError('CANCELLED')
+  }
+  const plan = await generateExecutionPlan(task, effectiveScope, locale)
+  const executor = createToolExecutor({ desktop, downloads, workspace, trashRoot })
+  const results = []
+  await fs.mkdir(path.join(workspace, 'logs'), { recursive: true })
+  await fs.appendFile(path.join(workspace, 'logs', 'execution.jsonl'), `${JSON.stringify({ at: now(), event: 'execution.started', plan, scope: effectiveScope })}\n`, 'utf8')
+  for (const action of plan.actions) { await checkpoint(); results.push(await executor.run(action, effectiveScope)) }
+  await checkpoint()
+  const files = results.flatMap(result => Array.isArray(result.files) ? result.files : result.file ? [result.file] : []).filter(file => typeof file.path === 'string')
   const unique = [...new Map(files.map(file => [file.path, file])).values()]
   const outputName = `${slug(task.title)}-任务说明.md`
   const outputPath = path.join(workspace, 'output', outputName)
-  const narrative = await generateResult(task, unique, locale)
-  const report = `# ${task.title}\n\n${narrative.markdown}\n\n## 文件摘要\n\n${unique.slice(0, 30).map(file => `- ${file.name}（${Math.ceil(file.size / 1024)} KB）\n  - ${file.path}`).join('\n') || '- 暂未找到可列出的文件'}\n\n## 下一步建议\n\n${narrative.suggestions.map(item => `- ${item}`).join('\n')}`
+  const operationSummary = results.map(result => ({ tool: result.tool, count: result.files?.length ?? (result.file ? 1 : 0), path: result.path, recoverable: result.recoverable }))
+  const narrative = await generateResult(task, unique, locale, operationSummary)
+  const operationLines = results.flatMap(result => Array.isArray(result.files) ? result.files.map(file => result.tool === 'move_to_trash' ? `- 已移到回收站：${file.name}` : `- ${result.tool}：${file.name}`) : [`- ${result.tool}：${result.path ?? '完成'}`])
+  const report = `# ${task.title}\n\n${narrative.markdown}\n\n## 执行计划\n\n${plan.summary || '-'}\n\n## 已执行操作\n\n${operationLines.join('\n') || '- 没有找到符合条件的文件'}\n\n## 文件摘要\n\n${unique.slice(0, 30).map(file => `- ${file.name}（${Math.ceil(file.size / 1024)} KB）\n  - ${file.path}`).join('\n') || '- 暂未找到可列出的文件'}\n\n## 下一步建议\n\n${narrative.suggestions.map(item => `- ${item}`).join('\n')}`
   await fs.writeFile(outputPath, report, 'utf8')
-  await fs.writeFile(path.join(workspace, 'logs', 'execution.jsonl'), `${JSON.stringify({ at: now(), tool: 'list_files', count: unique.length })}\n`, 'utf8')
-  const updated = { ...task, status: 'COMPLETED', stage: 'completed', updatedAt: now(), workspacePath: workspace, foundFiles: unique.length, completedSteps: 5, elapsedSeconds: Math.max(4, unique.length), resultSummary: narrative.summary, suggestions: narrative.suggestions, feedbackOptions: narrative.feedbackOptions, artifacts: [{ id: id('artifact'), name: outputName, path: outputPath, kind: 'markdown', size: Buffer.byteLength(report), generatedAt: now(), version: task.version }], events: [...task.events, event('task.progress', '正在查找文件', { foundFiles: unique.length }), event('task.completed', '已经完成，结果已放入任务文件夹')], version: task.version }
+  await fs.appendFile(path.join(workspace, 'logs', 'execution.jsonl'), `${JSON.stringify({ at: now(), event: 'execution.completed', plan, results: operationSummary })}\n`, 'utf8')
+  const updated = { ...task, status: 'COMPLETED', stage: 'completed', updatedAt: now(), workspacePath: workspace, foundFiles: unique.length, completedSteps: plan.actions.length + 1, totalSteps: plan.actions.length + 1, elapsedSeconds: Math.max(4, unique.length), resultSummary: narrative.summary, suggestions: narrative.suggestions, feedbackOptions: narrative.feedbackOptions, artifacts: [{ id: id('artifact'), name: outputName, path: outputPath, kind: 'markdown', size: Buffer.byteLength(report), generatedAt: now(), version: task.version }], events: [...task.events, event('task.progress', '正在执行本地工具', { foundFiles: unique.length }), ...results.map(result => event('tool.completed', result.tool, { count: result.files?.length ?? 0 })), event('task.completed', '已经完成，结果已放入任务文件夹')], version: task.version }
+  taskControls.delete(task.id)
   return updated
 }
 
@@ -280,7 +349,7 @@ async function parseBody(req) {
 async function route(req, url) {
   const body = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await parseBody(req) : {}
   const tasks = await readTasks()
-  if (req.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'ai-for-the-old-local', version: '0.1.4', deepseekConfigured: Boolean(process.env.DEEPSEEK_API_KEY) })
+  if (req.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'ai-for-the-old-local', version: '0.1.7', deepseekConfigured: Boolean(process.env.DEEPSEEK_API_KEY) })
   if (req.method === 'GET' && url.pathname === '/api/account/status') return json(await accountStatus(url.searchParams.get('refresh') === '1'))
   if (req.method === 'POST' && url.pathname === '/api/account/login/start') return json(await initializeAccount().start(body.locale === 'en' ? 'en' : 'zh'))
   if (req.method === 'POST' && url.pathname === '/api/account/login/cancel') { await initializeAccount().cancel(); return json(await accountStatus()) }
@@ -316,15 +385,57 @@ async function route(req, url) {
     const assistantTurn = plan.nextAction === 'ask_question' ? { id: id('turn'), role: 'assistant', content: plan.question, createdAt: now() } : null
     const next = { ...task, locale, status: plan.nextAction === 'ask_question' ? 'CLARIFYING' : 'READY_TO_RUN', stage: plan.nextAction === 'ask_question' ? 'clarifying' : 'ready', pendingQuestion: plan.nextAction === 'ask_question' ? plan.question : undefined, modelSummary: plan.summary, candidateOptions: plan.nextAction === 'ask_question' ? [] : task.candidateOptions ?? [], updatedAt: now(), turns: [...task.turns, { id: id('turn'), role: 'user', content, createdAt: now() }, ...(assistantTurn ? [assistantTurn] : [])], events: [...task.events, event(plan.nextAction === 'ask_question' ? 'clarification.question' : 'clarification.confirmed', plan.nextAction === 'ask_question' ? 'DeepSeek 正在继续确认一个问题' : 'DeepSeek 已确认任务目标')] }
     tasks[index] = next; await writeTasks(tasks)
-    return json({ task: next, preview: plan.nextAction === 'ready_to_run' ? { target: plan.target, roots: [desktop, path.join(os.homedir(), 'Downloads')], output: plan.output, network: plan.network, summary: plan.summary } : null, question: plan.question || undefined })
+    return json({ task: next, preview: plan.nextAction === 'ready_to_run' ? { target: plan.target, roots: defaultScopeRoots(task.prompt), output: plan.output, network: plan.network, summary: plan.summary } : null, question: plan.question || undefined })
   }
   if (req.method === 'POST' && action === 'access-scope') {
-    const next = { ...task, accessScope: { roots: body.roots ?? [desktop, path.join(os.homedir(), 'Downloads')], network: Boolean(body.network), agreedAt: now() }, status: 'ACCESS_PENDING', stage: 'access', updatedAt: now(), events: [...task.events, event('access.approved', '已记录本次任务的访问范围')] }
+    const next = { ...task, accessScope: { roots: Array.isArray(body.roots) && body.roots.length ? body.roots : defaultScopeRoots(task.prompt), network: Boolean(body.network), agreedAt: now() }, status: 'ACCESS_PENDING', stage: 'access', updatedAt: now(), events: [...task.events, event('access.approved', '已记录本次任务的访问范围')] }
     tasks[index] = next; await writeTasks(tasks); return json(next)
   }
   if (req.method === 'POST' && action === 'run') {
     if (!['READY_TO_RUN', 'ACCESS_PENDING', 'PAUSED', 'FAILED'].includes(task.status)) return json({ code: 'task_not_ready', message: '这个任务还没有准备好执行' }, 409)
-    const next = await runTask({ ...task, status: 'RUNNING', stage: 'running' }, task.accessScope ?? body, task.locale ?? 'zh')
+    const requestedScope = { roots: Array.isArray(body.roots) && body.roots.length ? body.roots : defaultScopeRoots(task.prompt), network: Boolean(body.network), agreedAt: now() }
+    const scope = task.accessScope ?? requestedScope
+    const authorized = task.accessScope ? task : { ...task, accessScope: scope, status: 'ACCESS_PENDING', stage: 'access', updatedAt: now(), events: [...task.events, event('access.approved', '已一次性记录本次任务的访问范围')] }
+    const running = { ...authorized, status: 'RUNNING', stage: 'running', workspacePath: authorized.workspacePath ?? await createWorkspace(authorized.title), updatedAt: now(), events: [...authorized.events, event('task.started', '开始执行已确认的本地工具')] }
+    tasks[index] = running; await writeTasks(tasks)
+    taskControls.set(task.id, { paused: false, cancelled: false })
+    try {
+      const next = await runTask(running, scope, task.locale ?? 'zh')
+      const latest = await readTasks()
+      const latestIndex = latest.findIndex(item => item.id === task.id)
+      if (latestIndex >= 0 && latest[latestIndex].status === 'CANCELLED') return json(latest[latestIndex], 409)
+      const latestTask = latestIndex >= 0 ? latest[latestIndex] : null
+      const completed = latestTask ? { ...next, events: latestTask.events } : next
+      tasks[index] = completed; await writeTasks(tasks); return json(completed)
+    } catch (error) {
+      taskControls.delete(task.id)
+      const latest = await readTasks()
+      const latestIndex = latest.findIndex(item => item.id === task.id)
+      if (latestIndex >= 0 && ['CANCELLED', 'PAUSED'].includes(latest[latestIndex].status)) return json(latest[latestIndex], 409)
+      const failed = { ...running, status: 'FAILED', stage: 'failed', updatedAt: now(), failureReason: error instanceof Error ? error.message : '本地执行失败', events: [...running.events, event('task.failed', error instanceof Error ? error.message : '本地执行失败')] }
+      tasks[index] = failed; await writeTasks(tasks)
+      return json({ ...failed, code: 'task_failed', message: failed.failureReason }, 500)
+    }
+  }
+  if (req.method === 'POST' && action === 'pause') {
+    if (task.status !== 'RUNNING') return json({ code: 'task_not_running', message: '这个任务当前没有在执行' }, 409)
+    const control = taskControls.get(task.id) ?? { paused: false, cancelled: false }
+    control.paused = true; taskControls.set(task.id, control)
+    const next = { ...task, status: 'PAUSED', stage: 'paused', updatedAt: now(), events: [...task.events, event('task.paused', '任务已暂停，可以继续或停止')] }
+    tasks[index] = next; await writeTasks(tasks); return json(next)
+  }
+  if (req.method === 'POST' && action === 'resume') {
+    if (task.status !== 'PAUSED') return json({ code: 'task_not_paused', message: '这个任务当前没有暂停' }, 409)
+    const control = taskControls.get(task.id) ?? { paused: false, cancelled: false }
+    control.paused = false; control.cancelled = false; taskControls.set(task.id, control)
+    const next = { ...task, status: 'RUNNING', stage: 'running', updatedAt: now(), events: [...task.events, event('task.resumed', '任务继续执行')] }
+    tasks[index] = next; await writeTasks(tasks); return json(next)
+  }
+  if (req.method === 'POST' && action === 'cancel') {
+    if (!['RUNNING', 'PAUSED', 'READY_TO_RUN', 'ACCESS_PENDING'].includes(task.status)) return json({ code: 'task_not_cancellable', message: '这个任务当前不能停止' }, 409)
+    const control = taskControls.get(task.id)
+    if (control) control.cancelled = true
+    const next = { ...task, status: 'CANCELLED', stage: 'cancelled', updatedAt: now(), events: [...task.events, event('task.cancelled', '任务已停止')] }
     tasks[index] = next; await writeTasks(tasks); return json(next)
   }
   if (req.method === 'POST' && action === 'feedback') {
@@ -390,4 +501,4 @@ if (process.env.AI_OLD_DESKTOP !== '1' && process.env.NODE_ENV !== 'test' && !pr
 }
 function dispose() { account?.dispose(); httpServer.close() }
 
-export { allowedTools, fallbackCandidates, createTask, generateCandidates, generatePlan, generateResult, validatePlan, listFiles, slug, httpServer, startServer, configureDesktop, dispatch, dispose }
+export { allowedTools, fallbackCandidates, createTask, generateCandidates, generatePlan, generateExecutionPlan, generateResult, validatePlan, validateExecutionPlan, listFiles, slug, httpServer, startServer, configureDesktop, dispatch, dispose }

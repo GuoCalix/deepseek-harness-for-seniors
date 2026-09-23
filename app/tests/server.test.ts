@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, mkdir, writeFile, access } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -22,7 +22,8 @@ async function waitForServer() {
 describe('local task engine', () => {
   beforeAll(async () => {
     directory = await mkdtemp(path.join(os.tmpdir(), 'ai-old-api-test-'))
-    server = spawn(process.execPath, ['app/server/index.mjs'], { env: { ...process.env, NODE_ENV: '', VITEST: '', DEEPSEEK_API_KEY: '', AI_OLD_DESKTOP: '', AI_OLD_DATA_DIR: directory, AI_OLD_WORKSPACE_ROOT: path.join(directory, 'workspace'), AI_OLD_ALLOW_MOCK: 'true', AI_OLD_API_PORT: '0' }, stdio: ['ignore', 'pipe', 'pipe'] })
+    await Promise.all([mkdir(path.join(directory, 'Desktop')), mkdir(path.join(directory, 'Downloads'))])
+    server = spawn(process.execPath, ['app/server/index.mjs'], { env: { ...process.env, NODE_ENV: '', VITEST: '', DEEPSEEK_API_KEY: '', AI_OLD_DESKTOP: '', AI_OLD_DESKTOP_PATH: path.join(directory, 'Desktop'), AI_OLD_DOWNLOADS_PATH: path.join(directory, 'Downloads'), AI_OLD_DATA_DIR: directory, AI_OLD_WORKSPACE_ROOT: path.join(directory, 'workspace'), AI_OLD_ALLOW_MOCK: 'true', AI_OLD_API_PORT: '0' }, stdio: ['ignore', 'pipe', 'pipe'] })
     await new Promise<void>((resolve, reject) => {
       server.stdout!.on('data', data => { const match = String(data).match(/127\.0\.0\.1:(\d+)/); if (match) { port = Number(match[1]); resolve() } })
       server.once('exit', () => reject(new Error('Test API exited before listening')))
@@ -67,5 +68,30 @@ describe('local task engine', () => {
     expect(body.task.status).toBe('READY_TO_RUN')
     expect(body.task.events.at(-1)?.type).toBe('clarification.confirmed')
     expect(body.preview.output).toContain('workspace')
+  })
+
+  it('executes a confirmed delete through the structured tool and records one access grant', async () => {
+    const installer = path.join(directory, 'Desktop', '安装包.dmg')
+    await writeFile(installer, 'fixture')
+    const created = await fetch(`http://127.0.0.1:${port}/api/tasks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: '删除桌面上的安装包' }) }).then(response => response.json()) as { task: { id: string } }
+    const clarified = await fetch(`http://127.0.0.1:${port}/api/tasks/${created.task.id}/clarifications`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: '删除桌面上的安装包' }) }).then(response => response.json()) as { preview: { roots: string[] } }
+    const response = await fetch(`http://127.0.0.1:${port}/api/tasks/${created.task.id}/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ roots: clarified.preview.roots, network: true }) })
+    const result = await response.json() as { status: string; accessScope: { roots: string[] }; events: { type: string }[]; workspacePath: string }
+    expect(response.status).toBe(200)
+    expect(result.status).toBe('COMPLETED')
+    expect(result.accessScope.roots).toEqual([path.join(directory, 'Desktop')])
+    expect(result.events.filter(item => item.type === 'access.approved')).toHaveLength(1)
+    await expect(access(installer)).rejects.toThrow()
+    await access(path.join(result.workspacePath, 'output'))
+  })
+
+  it('persists a failed execution when a plan exceeds the approved roots', async () => {
+    const created = await fetch(`http://127.0.0.1:${port}/api/tasks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: '整理桌面文件' }) }).then(response => response.json()) as { task: { id: string } }
+    await fetch(`http://127.0.0.1:${port}/api/tasks/${created.task.id}/clarifications`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: '整理桌面文件' }) })
+    const response = await fetch(`http://127.0.0.1:${port}/api/tasks/${created.task.id}/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ roots: [path.join(directory, 'approved-only')], network: false }) })
+    const result = await response.json() as { status: string; failureReason: string }
+    expect(response.status).toBe(500)
+    expect(result.status).toBe('FAILED')
+    expect(result.failureReason).toContain('授权')
   })
 })

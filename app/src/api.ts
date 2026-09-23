@@ -20,6 +20,7 @@ declare global {
     desktop?: {
       request(method: string, path: string, body: string): Promise<{ status: number; body: string }>
       openDeepSeek(url: string): Promise<void>
+      openPath(path: string): Promise<void>
     }
   }
 }
@@ -27,6 +28,11 @@ declare global {
 export function openDeepSeek(url: string) {
   if (window.desktop) return window.desktop.openDeepSeek(url)
   window.open(url, '_blank', 'noopener,noreferrer')
+  return Promise.resolve()
+}
+
+export function openLocalPath(path: string) {
+  if (window.desktop) return window.desktop.openPath(path)
   return Promise.resolve()
 }
 
@@ -55,6 +61,9 @@ export const api = {
   createTask: (prompt: string, locale: 'zh' | 'en') => request<{ task: Task; candidates: Candidate[] }>('/api/tasks', { method: 'POST', body: JSON.stringify({ prompt, locale }) }),
   clarify: (taskId: string, content: string, locale: 'zh' | 'en') => request<{ task: Task; preview: Preview | null; question?: string }>(`/api/tasks/${taskId}/clarifications`, { method: 'POST', body: JSON.stringify({ content, locale }) }),
   approveAccess: (taskId: string, roots: string[], network: boolean) => request<Task>(`/api/tasks/${taskId}/access-scope`, { method: 'POST', body: JSON.stringify({ roots, network }) }),
-  run: (taskId: string) => request<Task>(`/api/tasks/${taskId}/run`, { method: 'POST' }),
+  run: (taskId: string, roots: string[], network: boolean) => request<Task>(`/api/tasks/${taskId}/run`, { method: 'POST', body: JSON.stringify({ roots, network }) }),
+  pause: (taskId: string) => request<Task>(`/api/tasks/${taskId}/pause`, { method: 'POST', body: '{}' }),
+  resume: (taskId: string) => request<Task>(`/api/tasks/${taskId}/resume`, { method: 'POST', body: '{}' }),
+  cancel: (taskId: string) => request<Task>(`/api/tasks/${taskId}/cancel`, { method: 'POST', body: '{}' }),
   feedback: (taskId: string, category: string, comment: string, good: boolean) => request<Task>(`/api/tasks/${taskId}/feedback`, { method: 'POST', body: JSON.stringify({ category, comment, good }) }),
 }

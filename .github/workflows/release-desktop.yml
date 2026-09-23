@@ -8,7 +8,7 @@ on:
       tag:
         description: Git ref to build (use a version tag when publishing)
         required: true
-        default: v0.1.6
+        default: v0.1.7
       publish:
         description: Publish installers after all checks pass
         type: boolean
@@ -53,6 +53,10 @@ jobs:
         run: npm run test:desktop
         env:
           AI_OLD_TEST_EXECUTABLE: ${{ github.workspace }}/release/${{ matrix.directory }}/AI for the old.app/Contents/MacOS/AI for the old
+      - name: Exercise a real packaged file-operation loop
+        run: npm run test:desktop:closed-loop
+        env:
+          AI_OLD_TEST_EXECUTABLE: ${{ github.workspace }}/release/${{ matrix.directory }}/AI for the old.app/Contents/MacOS/AI for the old
       - name: Verify architecture and code signature
         run: |
           lipo -archs 'release/${{ matrix.directory }}/AI for the old.app/Contents/MacOS/AI for the old'
@@ -88,6 +92,10 @@ jobs:
         env:
           AI_OLD_TEST_EXECUTABLE: ${{ github.workspace }}/release/win-unpacked/AI for the old.exe
           DEBUG: pw:browser
+      - name: Exercise a real packaged file-operation loop
+        run: npm run test:desktop:closed-loop
+        env:
+          AI_OLD_TEST_EXECUTABLE: ${{ github.workspace }}/release/win-unpacked/AI for the old.exe
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installer

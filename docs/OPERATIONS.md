@@ -13,7 +13,7 @@ The current desktop implementation uses Electron 44, React and a Node service. T
 | `app/server/storage.mjs` | Atomic writes and injected OS encryption |
 | `app/server/network.mjs` | TLS requests, redirect rejection, timeouts and bounded JSON |
 | `app/server/usage.mjs` | Serialized UTC-month local token totals and estimate flags |
-| `app/server/index.mjs` | Task contracts, metadata indexing, Markdown reports, local transport |
+| `app/server/index.mjs`, `app/server/tools.mjs` | Task contracts, DeepSeek planning, allowlisted local tools, Markdown reports, local transport |
 | `app/src/account.tsx` | Account state, login, balance, top-up and API-key UI |
 
 The packaged renderer loads relative assets through `file://` and uses a narrow preload bridge. Main checks both the requesting WebContents and its main frame against the packaged page. No Node APIs or stored credentials are exposed to the renderer. The HTTP listener uses an ephemeral loopback port only for the authorization callback; packaged HTTP API requests are refused. This removes the old file-origin CORS failure and port 4179 collision. Secure storage uses Electron's asynchronous encryptor so a locked Keychain or access prompt does not block the application main thread.
@@ -29,13 +29,14 @@ Use Node 22.22.2 or later. CI uses the maintained Node 22 release. Direct depend
 ```bash
 git clone --recurse-submodules https://github.com/GuoCalix/deepseek-harness-for-seniors.git
 cd deepseek-harness-for-seniors
-git checkout v0.1.6
+git checkout v0.1.7
 git submodule update --init --recursive
 npm ci
 npm run check
 npm test
 npm run build
 npm run test:desktop
+npm run test:desktop:closed-loop
 ```
 
 The submodule is a source reference and is not needed for the root build. To develop, run `npm run dev` and open <http://127.0.0.1:4178>. Connect an account/API key in the UI. Web-development credentials are deliberately session-only; desktop credentials persist through the OS store. An environment-provided `DEEPSEEK_API_KEY` is an optional developer fallback and is never copied into a build.
@@ -105,7 +106,7 @@ The old experimental cleartext `account.json` is not loaded. Do not migrate it b
 
 Close the application before backing up task/workspace files. Never delete original input folders as recovery. If a generation fails, inspect the existing output and retry from the task; do not retry provider requests automatically without considering duplicate charges.
 
-Current execution is limited to bounded metadata indexing and Markdown reports. Full Tauri/Rust migration, SQLite events, pause/resume/cancel execution, comprehensive file copying/conversion, document/spreadsheet tools and durable artifact versioning are outstanding design requirements. Do not advertise the complete original design as accepted.
+The executor runs only the allowlisted structured tools: bounded file listing and metadata/text reads, copies into the task workspace, recoverable Trash moves, workspace directory/text creation, Markdown/TXT-to-HTML conversion, CSV spreadsheet creation and restricted result opening. Model output is parsed as JSON and rejected unless every action and path passes the allowlist. No shell, subprocess, arbitrary delete or model-generated command is accepted. `POST /api/tasks/{id}/run` stores the selected directory and network consent once; pause/resume/cancel state and append-only execution logs make an in-flight task inspectable and retryable. Full Tauri/Rust migration, SQLite event storage, complete Office/PDF conversion, native permission prompts and durable artifact versioning remain design work. Do not advertise the complete original design as accepted.
 
 ## Quality gates and real-account acceptance
 
@@ -115,6 +116,7 @@ npm run check
 npm test
 npm run build
 npm run test:desktop
+npm run test:desktop:closed-loop
 git diff --check
 ```
 
