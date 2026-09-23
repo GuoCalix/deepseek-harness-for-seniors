@@ -122,16 +122,28 @@ function validateCandidates(value) {
 function validatePlan(value) {
   const action = value?.next_action
   if (action !== 'ready_to_run' && action !== 'ask_question') throw new Error('DeepSeek 返回了未知的澄清动作')
-  const plan = {
+  const question = typeof value.question === 'string' ? value.question.trim() : ''
+  if (action === 'ask_question') {
+    if (!question) throw new Error('需要继续澄清时必须返回问题')
+    // A follow-up question does not have an executable target or output yet.
+    // Those fields become mandatory only after the model says ready_to_run.
+    return {
+      nextAction: action,
+      question,
+      target: typeof value.target === 'string' ? value.target.trim() : '',
+      output: typeof value.output === 'string' ? value.output.trim() : '',
+      network: typeof value.network === 'string' ? value.network.trim() : '',
+      summary: typeof value.summary === 'string' && value.summary.trim() ? value.summary.trim() : question,
+    }
+  }
+  return {
     nextAction: action,
-    question: typeof value.question === 'string' ? value.question.trim() : '',
+    question,
     target: requireString(value.target, '任务目标'),
     output: requireString(value.output, '预计产物'),
     network: requireString(value.network, '联网说明'),
     summary: requireString(value.summary, '确认摘要'),
   }
-  if (action === 'ask_question' && !plan.question) throw new Error('需要继续澄清时必须返回问题')
-  return plan
 }
 
 function validateResult(value) {
@@ -160,8 +172,8 @@ async function generateCandidates(prompt, locale = 'zh') {
 async function generatePlan(task, content, locale = 'zh') {
   const fallback = { nextAction: 'ready_to_run', question: '', target: content, output: '任务 workspace/output/任务说明.md', network: '需要联网调用 DeepSeek 生成结果说明', summary: content }
   const response = await callDeepSeek([
-    { role: 'system', content: `你是任务澄清与执行预览助手。一次只提出一个问题；当目标、范围和产物足够明确时返回 ready_to_run，否则返回 ask_question。只返回 JSON，不要思维过程，不要 shell 命令。输出 ${locale === 'en' ? 'English' : '简体中文'}。` },
-    { role: 'user', content: JSON.stringify({ original_prompt: task.prompt, previous_turns: task.turns, latest_answer: content, output_schema: { next_action: 'ready_to_run | ask_question', question: 'string', target: 'string', output: 'string', network: 'string', summary: 'string' } }) },
+    { role: 'system', content: `你是任务澄清与执行预览助手。一次只提出一个问题；当目标、范围和产物足够明确时返回 ready_to_run，否则返回 ask_question。只返回 JSON，不要思维过程，不要 shell 命令。输出 ${locale === 'en' ? 'English' : '简体中文'}。当 next_action 为 ask_question 时只需返回 question，可省略 target、output、network、summary；当 next_action 为 ready_to_run 时必须返回全部五个字段。` },
+    { role: 'user', content: JSON.stringify({ original_prompt: task.prompt, previous_turns: task.turns, latest_answer: content, output_schema: { ask_question: { next_action: 'ask_question', question: 'string' }, ready_to_run: { next_action: 'ready_to_run', question: 'string', target: 'string', output: 'string', network: 'string', summary: 'string' } } }) },
   ])
   const raw = response?.content ?? null
   if (raw === null) {
@@ -378,4 +390,4 @@ if (process.env.AI_OLD_DESKTOP !== '1' && process.env.NODE_ENV !== 'test' && !pr
 }
 function dispose() { account?.dispose(); httpServer.close() }
 
-export { allowedTools, fallbackCandidates, createTask, generateCandidates, generatePlan, generateResult, listFiles, slug, httpServer, startServer, configureDesktop, dispatch, dispose }
+export { allowedTools, fallbackCandidates, createTask, generateCandidates, generatePlan, generateResult, validatePlan, listFiles, slug, httpServer, startServer, configureDesktop, dispatch, dispose }

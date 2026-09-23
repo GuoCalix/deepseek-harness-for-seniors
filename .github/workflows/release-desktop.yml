@@ -8,7 +8,7 @@ on:
       tag:
         description: Git ref to build (use a version tag when publishing)
         required: true
-        default: v0.1.4
+        default: v0.1.5
       publish:
         description: Publish installers after all checks pass
         type: boolean

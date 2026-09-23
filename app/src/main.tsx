@@ -61,7 +61,8 @@ function App() {
   }
   async function submitClarification() {
     if (!task || busy) return
-    const content = selectedCandidate ? candidates.find(item => item.id === selectedCandidate)?.title ?? '' : customClarification.trim()
+    const selected = selectedCandidate ? candidates.find(item => item.id === selectedCandidate) : undefined
+    const content = selected ? `${selected.title}\n说明：${selected.description}\n需要：${selected.needs}` : customClarification.trim()
     if (!content) return
     setBusy(true)
     try { const result = await api.clarify(task.id, content, locale); updateTask(result.task); setPreview(result.preview); setSelectedCandidate(null); setCustomClarification('') }
