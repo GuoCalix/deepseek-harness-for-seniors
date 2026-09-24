@@ -1,10 +1,42 @@
 import { promises as fs } from 'node:fs'
+import { execFile as execFileCallback } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
+import { promisify } from 'node:util'
 
-const TOOL_NAMES = new Set(['list_files', 'read_metadata', 'read_text', 'copy_files', 'move_to_trash', 'create_directory', 'write_text', 'convert_document', 'create_spreadsheet', 'open_result'])
+const execFile = promisify(execFileCallback)
+const TOOL_NAMES = new Set(['list_files', 'read_metadata', 'read_text', 'copy_files', 'move_to_trash', 'create_directory', 'write_text', 'convert_document', 'create_spreadsheet', 'open_result', 'run_command'])
 const MAX_FILES = 200
 const MAX_TEXT = 1_048_576
+const COMMANDS = new Set(['du', 'file', 'find', 'head', 'ls', 'pwd', 'sort', 'stat', 'wc'])
+
+const selectorSchema = {
+  type: 'object',
+  properties: {
+    extensions: { type: 'array', items: { type: 'string' }, description: '文件扩展名，例如 .dmg；只在确实需要时填写。' },
+    name_contains: { type: 'array', items: { type: 'string' }, description: '文件名包含的任意关键词。' },
+    modified_after: { type: 'string' },
+    modified_before: { type: 'string' },
+    max_depth: { type: 'integer', minimum: 0, maximum: 5 },
+    limit: { type: 'integer', minimum: 1, maximum: MAX_FILES },
+    include_hidden: { type: 'boolean' },
+  },
+  additionalProperties: false,
+}
+
+export const TOOL_DEFINITIONS = [
+  { name: 'list_files', description: 'Recursively list authorized files matching selectors. Use this before changing files when the target is ambiguous.', input_schema: { type: 'object', properties: { source_scope: { type: 'string' }, selectors: selectorSchema }, required: ['source_scope', 'selectors'], additionalProperties: false } },
+  { name: 'read_metadata', description: 'Read names, paths, sizes, extensions and modification times for authorized files.', input_schema: { type: 'object', properties: { source_scope: { type: 'string' }, selectors: selectorSchema }, required: ['source_scope', 'selectors'], additionalProperties: false } },
+  { name: 'read_text', description: 'Read a bounded UTF-8 text file from an authorized scope.', input_schema: { type: 'object', properties: { source_scope: { type: 'string' }, selectors: selectorSchema }, required: ['source_scope', 'selectors'], additionalProperties: false } },
+  { name: 'copy_files', description: 'Copy matching files into the task workspace.', input_schema: { type: 'object', properties: { source_scope: { type: 'string' }, selectors: selectorSchema, destination: { type: 'string' } }, required: ['source_scope', 'selectors', 'destination'], additionalProperties: false } },
+  { name: 'move_to_trash', description: 'Move matching files to the recoverable system Trash. Never permanently delete.', input_schema: { type: 'object', properties: { source_scope: { type: 'string' }, selectors: selectorSchema }, required: ['source_scope', 'selectors'], additionalProperties: false } },
+  { name: 'create_directory', description: 'Create a directory inside the task workspace.', input_schema: { type: 'object', properties: { destination: { type: 'string' } }, required: ['destination'], additionalProperties: false } },
+  { name: 'write_text', description: 'Write text inside the task workspace.', input_schema: { type: 'object', properties: { destination: { type: 'string' }, content: { type: 'string' } }, required: ['destination', 'content'], additionalProperties: false } },
+  { name: 'convert_document', description: 'Convert authorized Markdown or TXT files to HTML inside the workspace.', input_schema: { type: 'object', properties: { source_scope: { type: 'string' }, selectors: selectorSchema, destination: { type: 'string' } }, required: ['source_scope', 'selectors', 'destination'], additionalProperties: false } },
+  { name: 'create_spreadsheet', description: 'Create a CSV spreadsheet inside the workspace from rows.', input_schema: { type: 'object', properties: { destination: { type: 'string' }, rows: { type: 'array', items: { type: 'array', items: {} } } }, required: ['destination', 'rows'], additionalProperties: false } },
+  { name: 'open_result', description: 'Return a workspace result path for the desktop UI to open.', input_schema: { type: 'object', properties: { destination: { type: 'string' } }, required: ['destination'], additionalProperties: false } },
+  { name: 'run_command', description: 'Run one read-only diagnostic command without a shell. Allowed programs: ls, find, file, stat, pwd, du, wc, head and sort. Paths must stay inside the approved directories or workspace.', input_schema: { type: 'object', properties: { program: { type: 'string', enum: [...COMMANDS] }, args: { type: 'array', items: { type: 'string' } } }, required: ['program', 'args'], additionalProperties: false } },
+]
 
 function within(root, target) {
   const relative = path.relative(path.resolve(root), path.resolve(target))
@@ -32,6 +64,12 @@ function matches(file, selectors = {}) {
   if (after !== undefined && file.modifiedAt < after) return false
   if (before !== undefined && file.modifiedAt > before) return false
   return true
+}
+
+function authorizedPath(value, roots, workspace) {
+  if (!path.isAbsolute(value)) return true
+  const target = path.resolve(value)
+  return [workspace, ...roots.map(item => item.path)].some(root => path.resolve(root) === target || within(root, target))
 }
 
 async function walk(root, selectors = {}) {
@@ -138,7 +176,7 @@ export function validateToolPlan(value) {
     if (!action || !TOOL_NAMES.has(action.tool)) throw new Error(`工具计划第 ${index + 1} 步不在安全白名单中`)
     const sourceScope = typeof action.source_scope === 'string' ? action.source_scope : typeof action.sourceScope === 'string' ? action.sourceScope : 'workspace'
     if (!['desktop', 'downloads', 'workspace', 'selected'].includes(sourceScope) && !path.isAbsolute(sourceScope)) throw new Error('工具计划的文件范围无效')
-    return { tool: action.tool, sourceScope, selectors: selectorObject(action.selectors), destination: typeof action.destination === 'string' ? action.destination : '', path: typeof action.path === 'string' ? action.path : '', content: typeof action.content === 'string' ? action.content : '', rows: normaliseRows(action.rows) }
+    return { tool: action.tool, sourceScope, selectors: selectorObject(action.selectors), destination: typeof action.destination === 'string' ? action.destination : '', path: typeof action.path === 'string' ? action.path : '', content: typeof action.content === 'string' ? action.content : '', rows: normaliseRows(action.rows), program: typeof action.program === 'string' ? action.program : '', args: Array.isArray(action.args) ? action.args.map(value => String(value)) : [] }
   })
   return { actions, summary: typeof value.summary === 'string' ? value.summary.trim() : '' }
 }
@@ -235,6 +273,19 @@ export function createToolExecutor({ desktop, downloads, workspace, trashRoot })
       if (action.tool === 'open_result') {
         const target = path.resolve(workspace, action.destination || 'output')
         await ensureWorkspace(target); return { tool: action.tool, path: target }
+      }
+      if (action.tool === 'run_command') {
+        if (!COMMANDS.has(action.program)) throw new Error('只能运行受控的只读诊断命令')
+        const allowed = authorizedRoots(scope, desktop, downloads)
+        if (action.args.some(argument => !authorizedPath(argument, allowed, workspace))) throw new Error('命令参数超出了本次已授权的目录')
+        if (action.args.some(argument => /[;&|`$<>\n\r]/u.test(argument))) throw new Error('命令参数包含不允许的 shell 字符')
+        try {
+          const result = await execFile(action.program, action.args, { cwd: workspace, shell: false, timeout: 30_000, maxBuffer: MAX_TEXT })
+          return { tool: action.tool, program: action.program, stdout: result.stdout.slice(0, MAX_TEXT), stderr: result.stderr.slice(0, MAX_TEXT) }
+        } catch (error) {
+          const detail = error && typeof error === 'object' ? error : {}
+          return { tool: action.tool, program: action.program, stdout: String(detail.stdout ?? '').slice(0, MAX_TEXT), stderr: String(detail.stderr ?? detail.message ?? '命令执行失败').slice(0, MAX_TEXT), exitCode: Number.isInteger(detail.code) ? detail.code : 1 }
+        }
       }
       throw new Error('未实现的工具调用')
     },

@@ -26,11 +26,34 @@ describe('local structured tool executor', () => {
     }
   })
 
+  it('does not require installer keywords when the approved extension identifies the package', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ai-old-tools-'))
+    const desktop = path.join(root, 'Desktop')
+    const downloads = path.join(root, 'Downloads')
+    const workspace = path.join(root, 'workspace')
+    await Promise.all([mkdir(desktop), mkdir(downloads), mkdir(workspace)])
+    await writeFile(path.join(desktop, 'MyApp-4.2.dmg'), 'fixture')
+    await writeFile(path.join(desktop, 'AnotherTool.dmg'), 'fixture')
+    const executor = createToolExecutor({ desktop, downloads, workspace, trashRoot: path.join(root, 'Trash') })
+    try {
+      const plan = validateToolPlan({ actions: [{ tool: 'move_to_trash', source_scope: 'desktop', selectors: { extensions: ['.dmg'], limit: 200 } }] })
+      const result = await executor.run(plan.actions[0], { roots: [desktop] })
+      expect(result.files).toHaveLength(2)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('rejects arbitrary commands and writes only inside workspace', async () => {
     expect(() => validateToolPlan({ actions: [{ tool: 'shell', source_scope: 'desktop' }] })).toThrow()
     const root = await mkdtemp(path.join(os.tmpdir(), 'ai-old-tools-'))
     const executor = createToolExecutor({ desktop: path.join(root, 'Desktop'), downloads: path.join(root, 'Downloads'), workspace: path.join(root, 'workspace') })
-    try { await expect(executor.run({ tool: 'write_text', sourceScope: 'workspace', destination: '../outside', content: 'x', selectors: {} }, { roots: [] })).rejects.toThrow('workspace') }
+    try {
+      await expect(executor.run({ tool: 'write_text', sourceScope: 'workspace', destination: '../outside', content: 'x', selectors: {} }, { roots: [] })).rejects.toThrow('workspace')
+      const listed = await executor.run({ tool: 'run_command', sourceScope: 'workspace', program: 'ls', args: ['.'], selectors: {} }, { roots: [] })
+      expect(typeof listed.stdout).toBe('string')
+      await expect(executor.run({ tool: 'run_command', sourceScope: 'workspace', program: 'ls', args: ['; touch outside'], selectors: {} }, { roots: [] })).rejects.toThrow('shell')
+    }
     finally { await rm(root, { recursive: true, force: true }) }
   })
 

@@ -50,11 +50,11 @@ npm run desktop:win -- --x64
 
 ### 本次验证与边界
 
-v0.1.7 在 v0.1.6 的澄清闭环基础上接入真实的本地结构化工具执行：`list_files`、`read_metadata`、`read_text`、`copy_files`、`move_to_trash`、`create_directory`、`write_text`、`convert_document`（Markdown/TXT → HTML）、`create_spreadsheet`（CSV）和 `open_result`。确认执行时目录和联网授权一次性保存；执行页支持暂停、继续和停止，失败会保留可重试任务和追加日志。删除只进入系统回收站，原文件可以恢复。隔离 Electron 闭环测试已实际验证“删除桌面上的安装包”移动到临时回收站，渲染错误为 0。
+v0.1.8 在 v0.1.7 的本地工具执行基础上接入 Harness 风格的 DeepSeek v4 Pro agent loop：默认启用 thinking，模型可以在授权范围内多轮观察文件、调用工具、读取结果并继续决策；适老化界面仍只显示阶段和结果，不显示思维内容。受控命令工具只允许无 shell 的只读诊断命令。安装包识别按扩展名工作，不再要求文件名必须包含“安装”。隔离 Electron 闭环测试已用两个普通命名的 `.dmg` 文件验证全部移入临时回收站，渲染错误为 0。
 
 官方 PKCE 初始化及微信扫码页已验证。手机扫码后的真实账号 grant、账号钱包及最终支付到账尚需用户交互验收；自动化协议测试使用明确标记的测试数据，不能替代这些真实账号验收。
 
-本次版本修复现有 Electron 项目的账号、分发和基本本地执行问题。设计文档要求的 Tauri/Rust 迁移、SQLite 事件存储、完整 Word/PDF 转换、跨平台原生权限和生产级恢复仍需后续迭代；当前实现明确只承诺上述受限工具和 CSV/HTML 基础格式，不能宣称已完成整份设计验收。要求保留在原设计文档中，未被降级或删除。
+本次版本修复现有 Electron 项目的账号、分发和本地执行问题。设计文档要求的 Tauri/Rust 迁移、SQLite 事件存储、完整 Word/PDF 转换、跨平台原生权限和生产级恢复仍需后续迭代；当前实现明确只承诺上述受限工具和 CSV/HTML 基础格式，不能宣称已完成整份设计验收。要求保留在原设计文档中，未被降级或删除。
 
 英文复现、恢复和维护说明见 [docs/OPERATIONS.md](docs/OPERATIONS.md)。上游协议与 token-meter 思路来自固定提交的 [DeepSeek Harness](deepseek-harness/)；这是适配实现，不是直接加载完整插件。许可见 [LICENSE](LICENSE) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
@@ -106,10 +106,10 @@ Dependency downloads may use `HTTPS_PROXY=http://127.0.0.1:6268` and `HTTP_PROXY
 
 ### Verification and remaining acceptance work
 
-v0.1.7 adds the real local structured-tool executor on top of the v0.1.6 clarification loop: `list_files`, `read_metadata`, `read_text`, `copy_files`, `move_to_trash`, `create_directory`, `write_text`, Markdown/TXT-to-HTML conversion, CSV spreadsheet creation and restricted result opening. Directory and network consent are stored once per task; pause, resume, cancel and retry states are persisted with append-only execution logs. Deletion uses the recoverable system Trash. An isolated Electron closed-loop test actually moved a desktop installer fixture into a temporary Trash and reported zero renderer errors.
+v0.1.8 adds a Harness-style DeepSeek v4 Pro agent loop on top of the restricted local tools. Thinking is enabled by default; the model can observe files, call tools, inspect results and continue across multiple rounds inside the approved scope. The senior-friendly UI exposes stages and results without exposing private reasoning. A shell-free read-only diagnostic command is available, and installer matching uses package extensions instead of requiring an installer keyword in the filename. The isolated Electron closed-loop test moved two ordinarily named `.dmg` files into temporary Trash with zero renderer errors.
 
 Live PKCE initialization and the official WeChat QR page were verified. Real account-grant inference, account-wallet retrieval and settled payment still require user interaction for acceptance. Protocol fixture tests do not stand in for those checks.
 
-This release repairs the existing Electron application's account, distribution and basic local execution flows. The design document's Tauri/Rust migration, SQLite event store, complete Word/PDF conversion, cross-platform native permission integration and production-grade recovery remain future work. The implementation explicitly supports the restricted tools and CSV/HTML formats listed above; this release is not full acceptance of the entire design. The original requirements remain intact.
+This release repairs the existing Electron application's account, distribution and local execution flows. The design document's Tauri/Rust migration, SQLite event store, complete Word/PDF conversion, cross-platform native permission integration and production-grade recovery remain future work. The implementation explicitly supports the restricted tools and CSV/HTML formats listed above; this release is not full acceptance of the entire design. The original requirements remain intact.
 
 See [docs/OPERATIONS.md](docs/OPERATIONS.md) for reproducible setup, recovery and maintenance. Protocol and token-meter approaches are adapted from the pinned [DeepSeek Harness](deepseek-harness/) source, not imported as the complete plugin runtime. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -8,7 +8,7 @@ import { createAccountService } from './account.mjs'
 import { credentialStore } from './storage.mjs'
 import { usageStore } from './usage.mjs'
 import { origin, requestJson } from './network.mjs'
-import { createToolExecutor, validateToolPlan } from './tools.mjs'
+import { createToolExecutor, TOOL_DEFINITIONS, validateToolPlan } from './tools.mjs'
 
 const port = Number(process.env.AI_OLD_API_PORT ?? 4179)
 const dataDir = process.env.AI_OLD_DATA_DIR ?? path.join(process.cwd(), 'app', 'data')
@@ -18,8 +18,10 @@ const downloads = process.env.AI_OLD_DOWNLOADS_PATH ?? path.join(os.homedir(), '
 const workspaceRoot = process.env.AI_OLD_WORKSPACE_ROOT ?? path.join(desktop, 'AI for the old')
 const trashRoot = process.env.AI_OLD_TRASH_ROOT
 const inferenceOrigin = origin(process.env.DEEPSEEK_INFERENCE_ORIGIN, 'https://api.deepseek.com')
-const allowedTools = ['list_files', 'read_metadata', 'read_text', 'copy_files', 'move_to_trash', 'create_directory', 'write_text', 'convert_document', 'create_spreadsheet', 'open_result']
+const allowedTools = TOOL_DEFINITIONS.map(tool => tool.name)
 const allowMockModel = process.env.AI_OLD_ALLOW_MOCK === 'true'
+const modelName = process.env.DEEPSEEK_MODEL ?? 'deepseek-v4-pro'
+const reasoningEffort = process.env.DEEPSEEK_REASONING_EFFORT ?? 'high'
 const now = () => new Date().toISOString()
 const id = prefix => `${prefix}_${crypto.randomUUID().slice(0, 8)}`
 const json = (value, status = 200) => ({ status, body: JSON.stringify(value), headers: { 'content-type': 'application/json; charset=utf-8' } })
@@ -117,7 +119,7 @@ function fallbackToolPlan(task) {
   const prompt = `${task.prompt}\n${task.turns.map(turn => turn.content).join('\n')}`
   if (/删除|移除|卸载/u.test(prompt) && /桌面/u.test(prompt) && /安装包|安装文件|安装程序|installer|setup/iu.test(prompt)) return {
     summary: '查找桌面上的安装包并移到系统回收站，原文件可以恢复。',
-    actions: [{ tool: 'move_to_trash', source_scope: 'desktop', selectors: { extensions: ['.dmg', '.pkg', '.exe', '.msi', '.deb', '.rpm', '.zip'], name_contains: ['安装', 'install', 'installer', 'setup'] } }],
+    actions: [{ tool: 'move_to_trash', source_scope: 'desktop', selectors: { extensions: ['.dmg', '.pkg', '.exe', '.msi', '.deb', '.rpm', '.zip'], limit: 200 } }],
   }
   if (/删除|移除|卸载/u.test(prompt)) return {
     summary: '查找用户明确范围内的目标文件并移到系统回收站，原文件可以恢复。',
@@ -293,12 +295,13 @@ async function runTask(task, scope = {}, locale = 'zh') {
     while (control.paused && !control.cancelled) await new Promise(resolve => setTimeout(resolve, 100))
     if (control.cancelled) throw new TaskControlError('CANCELLED')
   }
-  const plan = await generateExecutionPlan(task, effectiveScope, locale)
   const executor = createToolExecutor({ desktop, downloads, workspace, trashRoot })
-  const results = []
   await fs.mkdir(path.join(workspace, 'logs'), { recursive: true })
-  await fs.appendFile(path.join(workspace, 'logs', 'execution.jsonl'), `${JSON.stringify({ at: now(), event: 'execution.started', plan, scope: effectiveScope })}\n`, 'utf8')
-  for (const action of plan.actions) { await checkpoint(); results.push(await executor.run(action, effectiveScope)) }
+  const agent = await runHarnessAgent(task, effectiveScope, workspace, locale, executor, checkpoint)
+  const plan = agent?.plan ?? await generateExecutionPlan(task, effectiveScope, locale)
+  const results = agent?.results ?? []
+  await fs.appendFile(path.join(workspace, 'logs', 'execution.jsonl'), `${JSON.stringify({ at: now(), event: 'execution.started', plan, scope: effectiveScope, engine: agent ? 'deepseek-harness-agent-loop' : 'structured-fallback' })}\n`, 'utf8')
+  if (!agent) for (const action of plan.actions) { await checkpoint(); results.push(await executor.run(action, effectiveScope)) }
   await checkpoint()
   const files = results.flatMap(result => Array.isArray(result.files) ? result.files : result.file ? [result.file] : []).filter(file => typeof file.path === 'string')
   const unique = [...new Map(files.map(file => [file.path, file])).values()]
@@ -315,27 +318,88 @@ async function runTask(task, scope = {}, locale = 'zh') {
   return updated
 }
 
-async function callDeepSeek(messages) {
+function installerTask(task) {
+  return /删除|移除|卸载/u.test(`${task.prompt}\n${task.turns.map(turn => turn.content).join('\n')}`) && /安装包|安装文件|安装程序|installer|setup/iu.test(`${task.prompt}\n${task.turns.map(turn => turn.content).join('\n')}`)
+}
+
+function installerSelectors() {
+  return { extensions: ['.dmg', '.pkg', '.exe', '.msi', '.deb', '.rpm', '.zip'], limit: 200 }
+}
+
+async function runHarnessAgent(task, effectiveScope, workspace, locale, executor, checkpoint) {
+  const system = `你是 DeepSeek Harness 的本地任务智能体，负责在用户已确认的目录范围内完成任务。你可以多轮调用工具：先观察文件，再决定下一步；工具结果不完整时继续调用。不要输出思维过程给用户。删除只能调用 move_to_trash，结果可恢复；所有写入必须在 workspace。用户语言为 ${locale === 'en' ? 'English' : '简体中文'}。\n任务范围：${JSON.stringify(effectiveScope)}\n任务 workspace：${workspace}`
+  const messages = [{ role: 'user', content: `请完成这个任务：${task.prompt}\n\n历史确认：${task.turns.map(turn => `${turn.role}: ${turn.content}`).join('\n')}` }]
+  const results = []
+  const actions = []
+  for (let step = 0; step < 24; step += 1) {
+    await checkpoint()
+    const response = await callDeepSeekMessages([{ role: 'system', content: system }, ...messages], { tools: TOOL_DEFINITIONS, maxTokens: 16_384 })
+    if (response === null) return null
+    const blocks = response.blocks
+    const uses = blocks.filter(block => block.type === 'tool_use' && typeof block.name === 'string')
+    messages.push({ role: 'assistant', content: blocks })
+    if (!uses.length) {
+      // A text-only answer before any local observation is not a completed task.
+      // Let the deterministic plan path recover so the UI never reports success
+      // while leaving the user's files untouched.
+      if (!actions.length) return null
+      return { plan: { summary: response.text || 'DeepSeek Harness 已完成任务。', actions }, results, finalText: response.text }
+    }
+    const toolResults = []
+    for (const use of uses) {
+      await checkpoint()
+      const input = use.input && typeof use.input === 'object' ? use.input : {}
+      let action = validateToolPlan({ actions: [{ tool: use.name, ...input }] }).actions[0]
+      let result = await executor.run(action, effectiveScope)
+      // Models sometimes over-constrain a natural-language “安装包” request with
+      // a filename keyword. If that returns nothing, retry the safe installer
+      // extension set so ordinary names such as “MyApp-4.2.dmg” are included.
+      if (result.files?.length === 0 && ['list_files', 'read_metadata', 'move_to_trash'].includes(action.tool) && installerTask(task) && action.sourceScope === 'desktop') {
+        action = { ...action, selectors: installerSelectors() }
+        result = await executor.run(action, effectiveScope)
+      }
+      actions.push(action)
+      results.push(result)
+      toolResults.push({ type: 'tool_result', tool_use_id: use.id, content: JSON.stringify(result) })
+    }
+    messages.push({ role: 'user', content: toolResults })
+  }
+  throw new Error('DeepSeek Harness 工具循环超过 24 步，任务已停止以保护本机文件')
+}
+
+async function callDeepSeekMessages(messages, { tools = [], maxTokens = 8_192 } = {}) {
   const credential = await initializeAccount().credential()
   if (credential.mode === 'none') {
     if (allowMockModel) return null
     throw new Error('DeepSeek 未连接，请登录账号或在账户页面连接 API key / Connect your account or API key')
   }
   const isAccount = credential.mode === 'account'
-  const headers = { 'content-type': 'application/json', ...(isAccount ? { 'x-dsh-auth-token': credential.token, 'anthropic-version': '2023-06-01' } : { authorization: `Bearer ${credential.token}` }) }
-  const model = process.env.DEEPSEEK_MODEL ?? 'deepseek-chat'
-  const payload = isAccount
-    ? { model, max_tokens: 4096, stream: false, thinking: { type: 'disabled' }, temperature: 0.2,
-        system: messages.filter(m => m.role === 'system').map(m => m.content).join('\n\n'),
-        messages: messages.filter(m => m.role !== 'system').map(m => ({ role: m.role, content: m.content })) }
-    : { model, max_tokens: 4096, messages, temperature: 0.2, response_format: { type: 'json_object' } }
-  const body = await requestJson(`${inferenceOrigin}${isAccount ? '/anthropic/v1/messages' : '/chat/completions'}`, { method: 'POST', headers, body: JSON.stringify(payload) }, 2 * 1024 * 1024)
-  const content = isAccount ? body.content?.filter(item => item.type === 'text').map(item => item.text).join('') : body.choices?.[0]?.message?.content
+  const headers = { 'content-type': 'application/json', ...(isAccount ? { 'x-dsh-auth-token': credential.token } : { 'x-api-key': credential.token }), 'anthropic-version': '2023-06-01' }
+  const payload = {
+    model: modelName,
+    max_tokens: maxTokens,
+    stream: false,
+    temperature: 0.2,
+    thinking: reasoningEffort === 'off' ? { type: 'disabled' } : { type: 'enabled' },
+    ...(reasoningEffort === 'off' ? {} : { output_config: { effort: reasoningEffort } }),
+    ...(messages.some(message => message.role === 'system') ? { system: messages.filter(message => message.role === 'system').map(message => message.content).join('\n\n') } : {}),
+    messages: messages.filter(message => message.role !== 'system'),
+    ...(tools.length ? { tools } : {}),
+  }
+  const body = await requestJson(`${inferenceOrigin}/anthropic/v1/messages`, { method: 'POST', headers, body: JSON.stringify(payload) }, 4 * 1024 * 1024, 180_000)
+  const blocks = Array.isArray(body.content) ? body.content : []
+  const content = blocks.filter(item => item?.type === 'text').map(item => item.text).join('')
   const exact = body.usage && Number.isSafeInteger(body.usage.prompt_tokens ?? body.usage.input_tokens) && Number.isSafeInteger(body.usage.completion_tokens ?? body.usage.output_tokens)
   const measured = exact ? body.usage : { input_tokens: messages.reduce((total, message) => total + Math.ceil(JSON.stringify(message).length / 4) + 4, 0), output_tokens: Math.ceil(String(content ?? '').length / 4) }
   await usage.record(measured, !exact, isAccount)
-  if (typeof content !== 'string' || !content.trim()) throw new Error('DeepSeek returned no usable answer; retry the request')
-  return { content, usage: measured, authMode: credential.mode }
+  if (!blocks.length) throw new Error('DeepSeek returned no usable answer; retry the request')
+  return { blocks, text: content, usage: measured, authMode: credential.mode }
+}
+
+async function callDeepSeek(messages) {
+  const response = await callDeepSeekMessages(messages)
+  if (response === null) return null
+  return { content: response.text, usage: response.usage, authMode: response.authMode }
 }
 
 async function parseBody(req) {
@@ -349,7 +413,7 @@ async function parseBody(req) {
 async function route(req, url) {
   const body = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await parseBody(req) : {}
   const tasks = await readTasks()
-  if (req.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'ai-for-the-old-local', version: '0.1.7', deepseekConfigured: Boolean(process.env.DEEPSEEK_API_KEY) })
+  if (req.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'ai-for-the-old-local', version: '0.1.8', deepseekConfigured: Boolean(process.env.DEEPSEEK_API_KEY) })
   if (req.method === 'GET' && url.pathname === '/api/account/status') return json(await accountStatus(url.searchParams.get('refresh') === '1'))
   if (req.method === 'POST' && url.pathname === '/api/account/login/start') return json(await initializeAccount().start(body.locale === 'en' ? 'en' : 'zh'))
   if (req.method === 'POST' && url.pathname === '/api/account/login/cancel') { await initializeAccount().cancel(); return json(await accountStatus()) }

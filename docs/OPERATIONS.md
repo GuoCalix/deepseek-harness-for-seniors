@@ -13,14 +13,14 @@ The current desktop implementation uses Electron 44, React and a Node service. T
 | `app/server/storage.mjs` | Atomic writes and injected OS encryption |
 | `app/server/network.mjs` | TLS requests, redirect rejection, timeouts and bounded JSON |
 | `app/server/usage.mjs` | Serialized UTC-month local token totals and estimate flags |
-| `app/server/index.mjs`, `app/server/tools.mjs` | Task contracts, DeepSeek planning, allowlisted local tools, Markdown reports, local transport |
+| `app/server/index.mjs`, `app/server/tools.mjs` | Task contracts, Harness-style DeepSeek v4 Pro agent loop, allowlisted local tools, Markdown reports, local transport |
 | `app/src/account.tsx` | Account state, login, balance, top-up and API-key UI |
 
 The packaged renderer loads relative assets through `file://` and uses a narrow preload bridge. Main checks both the requesting WebContents and its main frame against the packaged page. No Node APIs or stored credentials are exposed to the renderer. The HTTP listener uses an ephemeral loopback port only for the authorization callback; packaged HTTP API requests are refused. This removes the old file-origin CORS failure and port 4179 collision. Secure storage uses Electron's asynchronous encryptor so a locked Keychain or access prompt does not block the application main thread.
 
 Development runs Vite at `127.0.0.1:4178` and the API at `127.0.0.1:4179`. The API rejects foreign origins, unexpected Host headers and non-JSON POST requests. The Vite proxy forwards same-origin `/api` requests. Never expose these development services on a public interface.
 
-The source reference is DeepSeek Harness commit `c36a83ff6bb95e3f82cf79f9be7c724270a8aa61`. Consult `deepseek-account-platform/src/{index,protocol,details}.ts`, `llm-deepseek/src/{adapter,translate}.ts` and `token-meter/src/estimate.ts`. This application adapts protocol and estimation rules without mounting Cordis or the full plugins. Preserve the MIT notice in `THIRD_PARTY_NOTICES.md` when distributing derivatives.
+The source reference is DeepSeek Harness commit `c36a83ff6bb95e3f82cf79f9be7c724270a8aa61`. Consult `deepseek-account-platform/src/{index,protocol,details}.ts`, `llm-deepseek/src/{adapter,translate}.ts` and `token-meter/src/estimate.ts`. This application now uses the Harness Messages/tool-call protocol and v4 Pro reasoning settings while keeping its guarded local tool executor and senior-friendly UI; it does not mount Cordis or the full plugins. Preserve the MIT notice in `THIRD_PARTY_NOTICES.md` when distributing derivatives.
 
 ## Reproduce a checkout
 
@@ -29,7 +29,7 @@ Use Node 22.22.2 or later. CI uses the maintained Node 22 release. Direct depend
 ```bash
 git clone --recurse-submodules https://github.com/GuoCalix/deepseek-harness-for-seniors.git
 cd deepseek-harness-for-seniors
-git checkout v0.1.7
+git checkout v0.1.8
 git submodule update --init --recursive
 npm ci
 npm run check
@@ -54,9 +54,9 @@ Provider traffic is direct by default. On a supported Node runtime, `NODE_USE_EN
 | Credential | Inference | Balance |
 | --- | --- | --- |
 | Official account grant | `POST https://api.deepseek.com/anthropic/v1/messages`, `x-dsh-auth-token`, `anthropic-version: 2023-06-01` | Platform `GET /auth-api/v0/users/current` and `GET /api/v0/users/get_user_summary` |
-| API key | `POST https://api.deepseek.com/chat/completions`, Bearer authorization, JSON mode | `GET https://api.deepseek.com/user/balance`, Bearer authorization |
+| API key | `POST https://api.deepseek.com/anthropic/v1/messages`, `x-api-key`, thinking/tool-call Messages | `GET https://api.deepseek.com/user/balance`, Bearer authorization |
 
-The current model defaults to `deepseek-chat` and can be set by the service's `DEEPSEEK_MODEL` environment variable. Account grants take priority; signing out removes only the account grant, retaining a separately configured API key. Removing a saved key does not remove a process environment key.
+The current model defaults to `deepseek-v4-pro` with `high` reasoning effort. Set `DEEPSEEK_MODEL` or `DEEPSEEK_REASONING_EFFORT` to override them. Account grants take priority; signing out removes only the account grant, retaining a separately configured API key. Removing a saved key does not remove a process environment key.
 
 Account authorization uses these Platform endpoints:
 

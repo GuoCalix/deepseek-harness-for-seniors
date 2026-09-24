@@ -5,8 +5,8 @@ export function origin(value, official) {
   return url.origin
 }
 
-export async function requestJson(url, init = {}, limit = 65_536) {
-  const signal = init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000)
+export async function requestJson(url, init = {}, limit = 65_536, timeoutMs = 30_000) {
+  const signal = init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
   let response
   try { response = await fetch(url, { ...init, redirect: 'error', signal }) }
   catch { throw new Error('DeepSeek network request failed; check the connection and retry') }
