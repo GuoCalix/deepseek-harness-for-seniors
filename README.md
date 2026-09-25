@@ -50,7 +50,7 @@ npm run desktop:win -- --x64
 
 ### 本次验证与边界
 
-v0.1.8 在 v0.1.7 的本地工具执行基础上接入 Harness 风格的 DeepSeek v4 Pro agent loop：默认启用 thinking，模型可以在授权范围内多轮观察文件、调用工具、读取结果并继续决策；适老化界面仍只显示阶段和结果，不显示思维内容。受控命令工具只允许无 shell 的只读诊断命令。安装包识别按扩展名工作，不再要求文件名必须包含“安装”。隔离 Electron 闭环测试已用两个普通命名的 `.dmg` 文件验证全部移入临时回收站，渲染错误为 0。
+v0.1.9 修复任务重新打开后授权范围被中文显示标签覆盖的问题，并兼容模型返回的绝对子目录、符号链接路径以及中英文目录别名。v0.1.8 的 Harness 风格 DeepSeek v4 Pro agent loop、thinking 和受控本地工具继续保留。隔离 Electron 闭环测试已用两个普通命名的 `.dmg` 文件验证全部移入临时回收站，渲染错误为 0。
 
 官方 PKCE 初始化及微信扫码页已验证。手机扫码后的真实账号 grant、账号钱包及最终支付到账尚需用户交互验收；自动化协议测试使用明确标记的测试数据，不能替代这些真实账号验收。
 
@@ -106,7 +106,7 @@ Dependency downloads may use `HTTPS_PROXY=http://127.0.0.1:6268` and `HTTP_PROXY
 
 ### Verification and remaining acceptance work
 
-v0.1.8 adds a Harness-style DeepSeek v4 Pro agent loop on top of the restricted local tools. Thinking is enabled by default; the model can observe files, call tools, inspect results and continue across multiple rounds inside the approved scope. The senior-friendly UI exposes stages and results without exposing private reasoning. A shell-free read-only diagnostic command is available, and installer matching uses package extensions instead of requiring an installer keyword in the filename. The isolated Electron closed-loop test moved two ordinarily named `.dmg` files into temporary Trash with zero renderer errors.
+v0.1.9 fixes a scope regression when a task is reopened: localized display labels are no longer sent as filesystem paths. Absolute authorized subdirectories, symlinked paths and English/Chinese scope aliases are accepted while the approved-root restriction remains enforced. The v0.1.8 Harness-style DeepSeek v4 Pro agent loop, thinking and guarded local tools remain enabled. The isolated Electron closed-loop test moved two ordinarily named `.dmg` files into temporary Trash with zero renderer errors.
 
 Live PKCE initialization and the official WeChat QR page were verified. Real account-grant inference, account-wallet retrieval and settled payment still require user interaction for acceptance. Protocol fixture tests do not stand in for those checks.
 

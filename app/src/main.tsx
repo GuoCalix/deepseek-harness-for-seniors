@@ -19,6 +19,7 @@ function dateLabel(value: string, locale: Locale) {
   return new Intl.DateTimeFormat(locale === 'zh' ? 'zh-CN' : 'en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(value))
 }
 function bytes(value: number) { return value < 1024 ? `${value} B` : value < 1024 * 1024 ? `${Math.ceil(value / 1024)} KB` : `${(value / 1024 / 1024).toFixed(1)} MB` }
+function absolutePath(value: string) { return value.startsWith('/') || /^[A-Za-z]:[\\/]/u.test(value) }
 
 function App() {
   const [locale, setLocale] = useState<Locale>(() => localStorage.getItem('ai-old-locale') === 'en' ? 'en' : 'zh')
@@ -57,7 +58,8 @@ function App() {
     } catch (error) { setNotice(error instanceof Error ? error.message : '无法创建任务') } finally { setBusy(false) }
   }
   function openTask(item: Task) {
-    setSelectedId(item.id); setCandidates(item.status === 'CLARIFYING' || item.status === 'REVISION' ? item.candidateOptions ?? candidates : []); setPreview(item.status === 'READY_TO_RUN' ? { target: item.modelSummary ?? item.turns.at(-1)?.content ?? item.title, roots: item.accessScope?.roots ?? ['桌面', '下载'], output: 'workspace/output/任务说明.md', network: '需要联网调用 DeepSeek 生成结果说明' } : null); setView('home'); setFeedback(''); setFeedbackComment('')
+    const roots = item.previewRoots?.filter(absolutePath) ?? item.accessScope?.roots?.filter(absolutePath) ?? []
+    setSelectedId(item.id); setCandidates(item.status === 'CLARIFYING' || item.status === 'REVISION' ? item.candidateOptions ?? candidates : []); setPreview(item.status === 'READY_TO_RUN' ? { target: item.modelSummary ?? item.turns.at(-1)?.content ?? item.title, roots, output: 'workspace/output/任务说明.md', network: '需要联网调用 DeepSeek 生成结果说明' } : null); setView('home'); setFeedback(''); setFeedbackComment('')
   }
   async function submitClarification() {
     if (!task || busy) return
@@ -122,7 +124,7 @@ function App() {
 
 function Sidebar({ view, onView, t, onHelp }: { view: View; onView: (view: View) => void; t: Copy; onHelp: () => void }) {
   const items: { view: View; label: string; icon: typeof Home }[] = [{ view: 'home', label: t.home, icon: Home }, { view: 'history', label: t.history, icon: History }, { view: 'account', label: t.account, icon: WalletCards }, { view: 'settings', label: t.settings, icon: Settings }]
-  return <aside className="sidebar"><div className="brand"><span className="brand-mark"><Sparkles size={22} /></span><div><strong>AI for the old</strong><small>DeepSeek workspace</small></div></div><nav className="nav-list" aria-label="Main navigation">{items.map(item => { const Icon = item.icon; return <button className={`nav-item ${view === item.view ? 'active' : ''}`} key={item.view} onClick={() => onView(item.view)}><Icon size={20} /><span>{item.label}</span>{view === item.view && <span className="nav-active-dot" />}</button> })}</nav><div className="sidebar-bottom"><div className="privacy-note"><ShieldCheck size={18} /><div><strong>{t.localFirst}</strong><span>{t.localHint.split('。')[0]}。</span></div></div><button className="help-button" onClick={onHelp}><CircleHelp size={19} /><span>{t.help}</span></button><small className="version-label">v0.1.8 · local-first</small></div></aside>
+  return <aside className="sidebar"><div className="brand"><span className="brand-mark"><Sparkles size={22} /></span><div><strong>AI for the old</strong><small>DeepSeek workspace</small></div></div><nav className="nav-list" aria-label="Main navigation">{items.map(item => { const Icon = item.icon; return <button className={`nav-item ${view === item.view ? 'active' : ''}`} key={item.view} onClick={() => onView(item.view)}><Icon size={20} /><span>{item.label}</span>{view === item.view && <span className="nav-active-dot" />}</button> })}</nav><div className="sidebar-bottom"><div className="privacy-note"><ShieldCheck size={18} /><div><strong>{t.localFirst}</strong><span>{t.localHint.split('。')[0]}。</span></div></div><button className="help-button" onClick={onHelp}><CircleHelp size={19} /><span>{t.help}</span></button><small className="version-label">v0.1.9 · local-first</small></div></aside>
 }
 
 function HomeView({ t, tasks, prompt, setPrompt, onStart, busy, onOpen, onSeeAll }: { t: Copy; tasks: Task[]; prompt: string; setPrompt: (value: string) => void; onStart: () => void; busy: boolean; onOpen: (task: Task) => void; onSeeAll: () => void }) {

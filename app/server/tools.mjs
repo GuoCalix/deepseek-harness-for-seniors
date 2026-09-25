@@ -43,6 +43,12 @@ function within(root, target) {
   return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative)
 }
 
+function sameOrWithin(root, target) {
+  const resolvedRoot = path.resolve(root)
+  const resolvedTarget = path.resolve(target)
+  return resolvedRoot === resolvedTarget || within(resolvedRoot, resolvedTarget)
+}
+
 function safeLimit(value) {
   return Number.isInteger(value) && value > 0 ? Math.min(value, MAX_FILES) : MAX_FILES
 }
@@ -99,6 +105,12 @@ function selectorObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 }
 
+function sourceScopeValue(value) {
+  if (typeof value !== 'string') return 'workspace'
+  const normalized = value.trim().toLowerCase()
+  return { '桌面': 'desktop', '下载': 'downloads', desktop: 'desktop', downloads: 'downloads', workspace: 'workspace', selected: 'selected' }[normalized] ?? value
+}
+
 function normaliseRows(value) {
   if (!Array.isArray(value)) return null
   const rows = value.slice(0, 1000).map(row => {
@@ -128,10 +140,10 @@ function markdownHtml(value) {
   }).join('\n')
 }
 
-function scopeRoot(scope, roots, workspace) {
+function scopeRoot(scope, roots, workspace, desktop, downloads) {
   if (scope === 'workspace') return workspace
-  if (scope === 'desktop') return roots.find(root => root.kind === 'desktop')?.path ?? path.join(os.homedir(), 'Desktop')
-  if (scope === 'downloads') return roots.find(root => root.kind === 'downloads')?.path ?? path.join(os.homedir(), 'Downloads')
+  if (scope === 'desktop') return roots.find(root => root.kind === 'desktop')?.path ?? path.resolve(desktop)
+  if (scope === 'downloads') return roots.find(root => root.kind === 'downloads')?.path ?? path.resolve(downloads)
   if (scope === 'selected') {
     const selected = roots.find(root => root.kind === 'selected')?.path
     if (selected) return selected
@@ -174,7 +186,7 @@ export function validateToolPlan(value) {
   if (!value || !Array.isArray(value.actions) || value.actions.length < 1 || value.actions.length > 20) throw new Error('DeepSeek 返回的工具计划无效')
   const actions = value.actions.map((action, index) => {
     if (!action || !TOOL_NAMES.has(action.tool)) throw new Error(`工具计划第 ${index + 1} 步不在安全白名单中`)
-    const sourceScope = typeof action.source_scope === 'string' ? action.source_scope : typeof action.sourceScope === 'string' ? action.sourceScope : 'workspace'
+    const sourceScope = sourceScopeValue(typeof action.source_scope === 'string' ? action.source_scope : action.sourceScope)
     if (!['desktop', 'downloads', 'workspace', 'selected'].includes(sourceScope) && !path.isAbsolute(sourceScope)) throw new Error('工具计划的文件范围无效')
     return { tool: action.tool, sourceScope, selectors: selectorObject(action.selectors), destination: typeof action.destination === 'string' ? action.destination : '', path: typeof action.path === 'string' ? action.path : '', content: typeof action.content === 'string' ? action.content : '', rows: normaliseRows(action.rows), program: typeof action.program === 'string' ? action.program : '', args: Array.isArray(action.args) ? action.args.map(value => String(value)) : [] }
   })
@@ -183,10 +195,15 @@ export function validateToolPlan(value) {
 
 export function createToolExecutor({ desktop, downloads, workspace, trashRoot }) {
   const roots = authorizedRoots({}, desktop, downloads)
-  function resolveSource(scope, currentScope) {
+  async function resolveSource(scope, currentScope) {
     const allowed = authorizedRoots(currentScope, desktop, downloads)
-    const root = scopeRoot(scope, allowed, workspace)
-    if (!allowed.some(item => path.resolve(item.path) === path.resolve(root)) && scope !== 'workspace') throw new Error('工具计划超出了本次已授权的目录')
+    const root = scopeRoot(scope, allowed, workspace, desktop, downloads)
+    const realRoot = await fs.realpath(root).catch(() => path.resolve(root))
+    const authorized = scope === 'workspace' || (await Promise.all(allowed.map(async item => sameOrWithin(item.path, root) || sameOrWithin(await fs.realpath(item.path).catch(() => path.resolve(item.path)), realRoot)))).some(Boolean)
+    if (!authorized) {
+      const approved = allowed.map(item => item.path).join(', ') || '（没有已授权目录）'
+      throw new Error(`工具计划超出了本次已授权的目录：请求 ${root}，已授权 ${approved}`)
+    }
     return root
   }
   async function ensureWorkspace(target) {
@@ -208,7 +225,7 @@ export function createToolExecutor({ desktop, downloads, workspace, trashRoot })
     }
   }
   async function filesFor(sourceScope, selectors, scope) {
-    const root = resolveSource(sourceScope, scope)
+    const root = await resolveSource(sourceScope, scope)
     return walk(root, selectors)
   }
   return {

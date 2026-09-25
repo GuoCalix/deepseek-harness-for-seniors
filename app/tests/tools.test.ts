@@ -44,6 +44,59 @@ describe('local structured tool executor', () => {
     }
   })
 
+  it('accepts an absolute authorized subdirectory and rejects a sibling outside the grant', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ai-old-tools-'))
+    const desktop = path.join(root, 'Desktop')
+    const downloads = path.join(root, 'Downloads')
+    const workspace = path.join(root, 'workspace')
+    const folder = path.join(desktop, 'Installers')
+    await Promise.all([mkdir(folder, { recursive: true }), mkdir(downloads), mkdir(workspace)])
+    await writeFile(path.join(folder, 'MyApp.dmg'), 'fixture')
+    const executor = createToolExecutor({ desktop, downloads, workspace, trashRoot: path.join(root, 'Trash') })
+    try {
+      const action = validateToolPlan({ actions: [{ tool: 'list_files', source_scope: folder + '/', selectors: { extensions: ['.dmg'] } }] }).actions[0]
+      const result = await executor.run(action, { roots: [desktop] })
+      expect(result.files).toHaveLength(1)
+      await expect(executor.run({ ...action, sourceScope: path.join(root, 'Other') }, { roots: [desktop] })).rejects.toThrow('超出了本次已授权的目录')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('does not silently broaden a selected-folder grant when the model says desktop', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ai-old-tools-'))
+    const desktop = path.join(root, 'Desktop')
+    const downloads = path.join(root, 'Downloads')
+    const workspace = path.join(root, 'workspace')
+    const selected = path.join(desktop, 'OnlyThisFolder')
+    await Promise.all([mkdir(selected, { recursive: true }), mkdir(downloads), mkdir(workspace)])
+    const executor = createToolExecutor({ desktop, downloads, workspace, trashRoot: path.join(root, 'Trash') })
+    try {
+      await expect(executor.run({ tool: 'list_files', sourceScope: 'desktop', selectors: {} }, { roots: [selected] })).rejects.toThrow('超出了本次已授权的目录')
+      const result = await executor.run({ tool: 'list_files', sourceScope: 'selected', selectors: {} }, { roots: [selected] })
+      expect(result.files).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts localized source scope aliases from a model tool call', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ai-old-tools-'))
+    const desktop = path.join(root, 'Desktop')
+    const downloads = path.join(root, 'Downloads')
+    const workspace = path.join(root, 'workspace')
+    await Promise.all([mkdir(desktop), mkdir(downloads), mkdir(workspace)])
+    await writeFile(path.join(desktop, 'package.dmg'), 'fixture')
+    const executor = createToolExecutor({ desktop, downloads, workspace, trashRoot: path.join(root, 'Trash') })
+    try {
+      const action = validateToolPlan({ actions: [{ tool: 'list_files', source_scope: '桌面', selectors: { extensions: ['.dmg'] } }] }).actions[0]
+      const result = await executor.run(action, { roots: [desktop] })
+      expect(result.files).toHaveLength(1)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('rejects arbitrary commands and writes only inside workspace', async () => {
     expect(() => validateToolPlan({ actions: [{ tool: 'shell', source_scope: 'desktop' }] })).toThrow()
     const root = await mkdtemp(path.join(os.tmpdir(), 'ai-old-tools-'))

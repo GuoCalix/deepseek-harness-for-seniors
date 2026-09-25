@@ -10,6 +10,7 @@ export interface Task {
   accessScope: { roots: string[]; network: boolean; agreedAt: string } | null; version: number
   foundFiles: number; completedSteps: number; totalSteps: number; elapsedSeconds: number
   candidateOptions?: Candidate[]; pendingQuestion?: string; modelSummary?: string
+  previewRoots?: string[]
   resultSummary?: string; suggestions?: string[]; feedbackOptions?: string[]; failureReason?: string
 }
 

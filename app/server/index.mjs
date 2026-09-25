@@ -76,6 +76,15 @@ function defaultScopeRoots(prompt) {
   return roots.length ? roots : [desktop, downloads]
 }
 
+function absoluteRoots(value) {
+  return Array.isArray(value) ? value.filter(item => typeof item === 'string' && path.isAbsolute(item)).map(item => path.resolve(item)) : []
+}
+
+function approvedRoots(value, prompt) {
+  const roots = absoluteRoots(value)
+  return roots.length ? roots : defaultScopeRoots(prompt)
+}
+
 async function createWorkspace(title) {
   const stamp = new Date().toISOString().slice(0, 10)
   const directory = path.join(workspaceRoot, `${slug(title)}-${stamp}`)
@@ -288,7 +297,7 @@ async function listFiles(root, depth = 0, limit = 80, result = []) {
 
 async function runTask(task, scope = {}, locale = 'zh') {
   const workspace = task.workspacePath ?? await createWorkspace(task.title)
-  const effectiveScope = { roots: Array.isArray(scope.roots) && scope.roots.length ? scope.roots : [desktop, downloads], network: Boolean(scope.network), agreedAt: scope.agreedAt ?? now() }
+  const effectiveScope = { roots: approvedRoots(scope.roots, task.prompt), network: Boolean(scope.network), agreedAt: scope.agreedAt ?? now() }
   const control = taskControls.get(task.id) ?? { paused: false, cancelled: false }
   taskControls.set(task.id, control)
   const checkpoint = async () => {
@@ -413,7 +422,7 @@ async function parseBody(req) {
 async function route(req, url) {
   const body = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await parseBody(req) : {}
   const tasks = await readTasks()
-  if (req.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'ai-for-the-old-local', version: '0.1.8', deepseekConfigured: Boolean(process.env.DEEPSEEK_API_KEY) })
+  if (req.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'ai-for-the-old-local', version: '0.1.9', deepseekConfigured: Boolean(process.env.DEEPSEEK_API_KEY) })
   if (req.method === 'GET' && url.pathname === '/api/account/status') return json(await accountStatus(url.searchParams.get('refresh') === '1'))
   if (req.method === 'POST' && url.pathname === '/api/account/login/start') return json(await initializeAccount().start(body.locale === 'en' ? 'en' : 'zh'))
   if (req.method === 'POST' && url.pathname === '/api/account/login/cancel') { await initializeAccount().cancel(); return json(await accountStatus()) }
@@ -447,18 +456,19 @@ async function route(req, url) {
     const locale = body.locale === 'en' ? 'en' : task.locale ?? 'zh'
     const plan = await generatePlan(task, content, locale)
     const assistantTurn = plan.nextAction === 'ask_question' ? { id: id('turn'), role: 'assistant', content: plan.question, createdAt: now() } : null
-    const next = { ...task, locale, status: plan.nextAction === 'ask_question' ? 'CLARIFYING' : 'READY_TO_RUN', stage: plan.nextAction === 'ask_question' ? 'clarifying' : 'ready', pendingQuestion: plan.nextAction === 'ask_question' ? plan.question : undefined, modelSummary: plan.summary, candidateOptions: plan.nextAction === 'ask_question' ? [] : task.candidateOptions ?? [], updatedAt: now(), turns: [...task.turns, { id: id('turn'), role: 'user', content, createdAt: now() }, ...(assistantTurn ? [assistantTurn] : [])], events: [...task.events, event(plan.nextAction === 'ask_question' ? 'clarification.question' : 'clarification.confirmed', plan.nextAction === 'ask_question' ? 'DeepSeek 正在继续确认一个问题' : 'DeepSeek 已确认任务目标')] }
+    const next = { ...task, locale, status: plan.nextAction === 'ask_question' ? 'CLARIFYING' : 'READY_TO_RUN', stage: plan.nextAction === 'ask_question' ? 'clarifying' : 'ready', pendingQuestion: plan.nextAction === 'ask_question' ? plan.question : undefined, modelSummary: plan.summary, previewRoots: plan.nextAction === 'ready_to_run' ? defaultScopeRoots(task.prompt) : undefined, candidateOptions: plan.nextAction === 'ask_question' ? [] : task.candidateOptions ?? [], updatedAt: now(), turns: [...task.turns, { id: id('turn'), role: 'user', content, createdAt: now() }, ...(assistantTurn ? [assistantTurn] : [])], events: [...task.events, event(plan.nextAction === 'ask_question' ? 'clarification.question' : 'clarification.confirmed', plan.nextAction === 'ask_question' ? 'DeepSeek 正在继续确认一个问题' : 'DeepSeek 已确认任务目标')] }
     tasks[index] = next; await writeTasks(tasks)
     return json({ task: next, preview: plan.nextAction === 'ready_to_run' ? { target: plan.target, roots: defaultScopeRoots(task.prompt), output: plan.output, network: plan.network, summary: plan.summary } : null, question: plan.question || undefined })
   }
   if (req.method === 'POST' && action === 'access-scope') {
-    const next = { ...task, accessScope: { roots: Array.isArray(body.roots) && body.roots.length ? body.roots : defaultScopeRoots(task.prompt), network: Boolean(body.network), agreedAt: now() }, status: 'ACCESS_PENDING', stage: 'access', updatedAt: now(), events: [...task.events, event('access.approved', '已记录本次任务的访问范围')] }
+    const next = { ...task, accessScope: { roots: approvedRoots(body.roots, task.prompt), network: Boolean(body.network), agreedAt: now() }, status: 'ACCESS_PENDING', stage: 'access', updatedAt: now(), events: [...task.events, event('access.approved', '已记录本次任务的访问范围')] }
     tasks[index] = next; await writeTasks(tasks); return json(next)
   }
   if (req.method === 'POST' && action === 'run') {
     if (!['READY_TO_RUN', 'ACCESS_PENDING', 'PAUSED', 'FAILED'].includes(task.status)) return json({ code: 'task_not_ready', message: '这个任务还没有准备好执行' }, 409)
-    const requestedScope = { roots: Array.isArray(body.roots) && body.roots.length ? body.roots : defaultScopeRoots(task.prompt), network: Boolean(body.network), agreedAt: now() }
-    const scope = task.accessScope ?? requestedScope
+    const requestedScope = { roots: approvedRoots(body.roots, task.prompt), network: Boolean(body.network), agreedAt: now() }
+    const storedRoots = absoluteRoots(task.accessScope?.roots)
+    const scope = storedRoots.length ? { ...task.accessScope, roots: storedRoots } : requestedScope
     const authorized = task.accessScope ? task : { ...task, accessScope: scope, status: 'ACCESS_PENDING', stage: 'access', updatedAt: now(), events: [...task.events, event('access.approved', '已一次性记录本次任务的访问范围')] }
     const running = { ...authorized, status: 'RUNNING', stage: 'running', workspacePath: authorized.workspacePath ?? await createWorkspace(authorized.title), updatedAt: now(), events: [...authorized.events, event('task.started', '开始执行已确认的本地工具')] }
     tasks[index] = running; await writeTasks(tasks)

@@ -66,6 +66,7 @@ describe('local task engine', () => {
     const response = await fetch(`http://127.0.0.1:${port}/api/tasks/${created.task.id}/clarifications`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: '写一份清楚的通知' }) })
     const body = await response.json() as { task: { status: string; events: { type: string }[] }; preview: { output: string } }
     expect(body.task.status).toBe('READY_TO_RUN')
+    expect(body.task.previewRoots).toEqual([path.join(directory, 'Desktop'), path.join(directory, 'Downloads')])
     expect(body.task.events.at(-1)?.type).toBe('clarification.confirmed')
     expect(body.preview.output).toContain('workspace')
   })
@@ -83,6 +84,19 @@ describe('local task engine', () => {
     expect(result.events.filter(item => item.type === 'access.approved')).toHaveLength(1)
     await expect(access(installer)).rejects.toThrow()
     await access(path.join(result.workspacePath, 'output'))
+  })
+
+  it('normalizes legacy display labels in a reopened task scope', async () => {
+    const installer = path.join(directory, 'Desktop', 'OrdinaryName.dmg')
+    await writeFile(installer, 'fixture')
+    const created = await fetch(`http://127.0.0.1:${port}/api/tasks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: '删除桌面上的安装包' }) }).then(response => response.json()) as { task: { id: string } }
+    await fetch(`http://127.0.0.1:${port}/api/tasks/${created.task.id}/clarifications`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: '删除桌面上的安装包' }) })
+    const response = await fetch(`http://127.0.0.1:${port}/api/tasks/${created.task.id}/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ roots: ['桌面', '下载'], network: false }) })
+    const result = await response.json() as { status: string; accessScope: { roots: string[] } }
+    expect(response.status).toBe(200)
+    expect(result.status).toBe('COMPLETED')
+    expect(result.accessScope.roots).toEqual([path.join(directory, 'Desktop')])
+    await expect(access(installer)).rejects.toThrow()
   })
 
   it('persists a failed execution when a plan exceeds the approved roots', async () => {
